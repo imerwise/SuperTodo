@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SuperTodo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="nav-row">
+        <button
+          class="nav"
+          id="prev"
+          title="Previous day (←)"
+          aria-label="Previous day"
+        >
+          &#8249;
+        </button>
+        <div class="head-center">
+          <div class="weekday" id="weekday">&nbsp;</div>
+          <div class="date" id="date">&nbsp;</div>
+        </div>
+        <button
+          class="nav"
+          id="next"
+          title="Next day (→)"
+          aria-label="Next day"
+        >
+          &#8250;
+        </button>
+      </div>
+      <div class="today-row">
+        <button class="today-btn" id="todayBtn" hidden>Jump to today</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <ul class="todo-list" id="list"></ul>
+      <p class="empty" id="empty" hidden>Nothing here yet — add your first task below.</p>
+    </main>
+
+    <footer class="composer" id="composer">
+      <input
+        id="input"
+        type="text"
+        placeholder="Add a task…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </footer>
+
+    <div class="modal-overlay" id="confirm" hidden>
+      <div class="modal" role="alertdialog" aria-modal="true">
+        <p class="modal-text" id="confirmText">Delete this task?</p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="confirmCancel">Cancel</button>
+          <button class="btn btn-danger" id="confirmOk">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="main.js"></script>
+  </body>
+</html>

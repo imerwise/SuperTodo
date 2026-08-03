@@ -1,0 +1,20 @@
+[package]
+name = "supertodo"
+version = "0.1.0"
+description = "A simple, clean, file-based todo list"
+authors = ["Imerwise"]
+edition = "2021"
+
+[lib]
+name = "supertodo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
