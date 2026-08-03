@@ -91,7 +91,11 @@ function render(data, fx = null) {
 
   data.items.forEach((item, index) => {
     const li = document.createElement("li");
-    li.className = "todo-item" + (item.checked ? " done" : "");
+    li.className =
+      "todo-item" +
+      (item.checked ? " done" : "") +
+      (item.rolled ? " rolled" : "") +
+      (data.is_past ? " past" : "");
     li.dataset.index = index;
     if (index === selectedIndex) li.classList.add("selected");
     // Rows can be dragged to reorder — but not on past days, not while an
@@ -104,8 +108,14 @@ function render(data, fx = null) {
     const check = document.createElement("button");
     check.className = "check";
     check.innerHTML = CHECK_SVG;
-    check.title = item.checked ? "Mark not done" : "Mark done";
-    check.addEventListener("click", () => toggle(index));
+    // Past days are review-only: the checkbox is shown but inert.
+    if (data.is_past || item.rolled) {
+      check.classList.add("readonly");
+      check.disabled = true;
+    } else {
+      check.title = item.checked ? "Mark not done" : "Mark done";
+      check.addEventListener("click", () => toggle(index));
+    }
     li.appendChild(check);
 
     if (!data.is_past && editingIndex === index) {
@@ -136,7 +146,13 @@ function render(data, fx = null) {
       label.textContent = item.text;
       li.appendChild(label);
 
-      if (item.carried) {
+      if (item.rolled) {
+        // Rolled over to a later day — shown here only as a record.
+        const badge = document.createElement("span");
+        badge.className = "badge moved";
+        badge.textContent = "moved on";
+        li.appendChild(badge);
+      } else if (item.carried) {
         const badge = document.createElement("span");
         badge.className = "badge";
         badge.textContent = "carried over";
@@ -306,9 +322,9 @@ function updateHints() {
         ? [["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]]
         : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]];
     } else if (viewIsPast) {
+      // Past days are review-only — no toggling, so no Space hint.
       pairs = [
         ["↑↓", "Move"],
-        ["Space", "Toggle"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
       ];
@@ -662,9 +678,9 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.key === " " && selectedIndex !== null) {
       // Space toggles the highlighted task done / not-done (never types into
-      // the add box during list navigation).
+      // the add box during list navigation). Past days are review-only.
       e.preventDefault();
-      toggle(selectedIndex);
+      if (!viewIsPast) toggle(selectedIndex);
       return;
     }
     if (e.key === "Enter" && selectedIndex !== null) {

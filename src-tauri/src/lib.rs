@@ -22,6 +22,11 @@ const CARRY_MARK: char = '\u{21AA}'; // ↪
 struct TodoItem {
     checked: bool,
     carried: bool,
+    // A [>] line: this task was unfinished and has been rolled over to a later
+    // day. It stays in the old file as a record and is shown, read-only, as
+    // "moved on". Preserving this flag through read/write is what keeps
+    // carry-over idempotent — a rolled item is never carried again.
+    rolled: bool,
     text: String,
 }
 
@@ -74,6 +79,7 @@ fn status_char(line: &str) -> Option<char> {
 fn parse_item(line: &str) -> Option<TodoItem> {
     let status = status_char(line)?;
     let checked = status == 'x' || status == 'X';
+    let rolled = status == '>';
     let mut rest = line[3..].trim();
     let mut carried = false;
     if let Some(r) = rest.strip_prefix(CARRY_MARK) {
@@ -86,12 +92,21 @@ fn parse_item(line: &str) -> Option<TodoItem> {
     Some(TodoItem {
         checked,
         carried,
+        rolled,
         text: rest.to_string(),
     })
 }
 
 fn format_item(item: &TodoItem) -> String {
-    let mark = if item.checked { 'x' } else { ' ' };
+    // A rolled-over task must round-trip back to [>] — writing it as [ ] would
+    // make carry-over re-carry it and duplicate the task.
+    let mark = if item.rolled {
+        '>'
+    } else if item.checked {
+        'x'
+    } else {
+        ' '
+    };
     if item.carried {
         format!("[{}] {} {}", mark, CARRY_MARK, item.text)
     } else {
@@ -164,6 +179,7 @@ fn ensure_today(dir: &PathBuf, today: NaiveDate) -> PathBuf {
                     items.push(TodoItem {
                         checked: false,
                         carried: true,
+                        rolled: false,
                         text: item.text.clone(),
                     });
                     let mark = if item.carried {
@@ -254,6 +270,7 @@ fn add_task(date: String, text: String) -> DayData {
         items.push(TodoItem {
             checked: false,
             carried: false,
+            rolled: false,
             text,
         });
         write_items(&path, &items);
@@ -314,13 +331,21 @@ fn reorder_task(date: String, order: Vec<usize>) -> DayData {
 #[tauri::command]
 fn toggle_task(date: String, index: usize) -> DayData {
     let d = parse_iso(&date);
-    let dir = storage_dir();
-    let path = file_for(&dir, d);
-    if path.exists() {
-        let mut items = read_items(&path);
-        if let Some(item) = items.get_mut(index) {
-            item.checked = !item.checked;
-            write_items(&path, &items);
+    // Past days are review-only: toggling there is disallowed. Rewriting a past
+    // file is the one thing that used to strip [>] markers and re-trigger
+    // carry-over, duplicating tasks — so it must never happen.
+    if d >= today() {
+        let dir = storage_dir();
+        let path = file_for(&dir, d);
+        if path.exists() {
+            let mut items = read_items(&path);
+            if let Some(item) = items.get_mut(index) {
+                // A rolled-over task lives on in a later day; it isn't toggled.
+                if !item.rolled {
+                    item.checked = !item.checked;
+                    write_items(&path, &items);
+                }
+            }
         }
     }
     build_day(d)

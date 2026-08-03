@@ -201,6 +201,20 @@ body {
   border-color: var(--accent);
 }
 
+/* On a past (review-only) day nothing is actionable, so the cursor uses a
+   neutral gray highlight instead of the accent tint. */
+.todo-item.past.selected {
+  background: var(--line);
+}
+
+.todo-item.past.selected .label {
+  color: inherit;
+}
+
+.todo-item.past.selected .check {
+  border-color: var(--muted);
+}
+
 .check {
   position: relative;
   flex: 0 0 auto;
@@ -233,6 +247,15 @@ body {
   border: 2px solid var(--accent);
   opacity: 0;
   pointer-events: none;
+}
+
+/* Review-only checkbox (past days / rolled items): shown, but inert. */
+.check.readonly {
+  cursor: default;
+}
+
+.check.readonly:hover {
+  border-color: var(--muted);
 }
 
 .check svg {
@@ -279,6 +302,26 @@ body {
   transform-origin: left center;
 }
 
+/* Completed on a past day: no longer "live", so the check goes gray rather
+   than accent and the whole row settles back a touch. */
+.todo-item.past.done {
+  opacity: 0.78;
+}
+
+.todo-item.past.done .check {
+  background: var(--muted);
+  border-color: var(--muted);
+}
+
+/* A rolled-over task: dimmed, muted, and struck — it lives on a later day. */
+.todo-item.rolled {
+  opacity: 0.62;
+}
+
+.todo-item.rolled .label {
+  color: var(--muted);
+}
+
 .badge {
   flex: 0 0 auto;
   font-size: 10px;
@@ -290,6 +333,12 @@ body {
   padding: 2px 7px;
   border-radius: 999px;
   white-space: nowrap;
+}
+
+/* "moved on" — a rolled-over task shown as a record on its original day. */
+.badge.moved {
+  color: var(--muted);
+  background: var(--line);
 }
 
 .actions {
