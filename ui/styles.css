@@ -9,6 +9,7 @@
   --carried: #d97706;
   --carried-soft: #fdf3e5;
   --danger: #ef4444;
+  --danger-soft: #fdecec;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +24,7 @@
     --carried: #f0a44a;
     --carried-soft: #3a2f1c;
     --danger: #f87171;
+    --danger-soft: #3a2020;
   }
 }
 
@@ -348,73 +350,139 @@ body {
   color: var(--muted);
 }
 
-/* Confirm dialog ---------------------------------------------------- */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
+/* Status bar (contextual key hints) --------------------------------- */
+.statusbar {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.35);
+  align-items: center;
+  overflow: hidden;
 }
 
-.modal-overlay[hidden] {
+/* When the hints don't fit, the bar left-aligns and the track ping-pongs. */
+.statusbar.overflowing {
+  justify-content: flex-start;
+}
+
+.statusbar-track {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.statusbar-track.scrolling {
+  will-change: transform;
+  animation: hint-pingpong var(--hint-duration, 12s) ease-in-out infinite;
+}
+
+/* Slow back-and-forth with a short pause at each end (the flat segments). */
+@keyframes hint-pingpong {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  50%,
+  62% {
+    transform: translateX(var(--hint-shift, 0));
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statusbar-track.scrolling {
+    animation: none;
+  }
+}
+
+.statusbar .k {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.statusbar:empty {
   display: none;
 }
 
-.modal {
-  width: 100%;
-  max-width: 300px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 20px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+/* While the add box is focused, dim the list so the composer stands out.
+   The highlighted row stays highlighted underneath. */
+.content {
+  transition: opacity 0.15s ease;
 }
 
-.modal-text {
-  font-size: 15px;
-  line-height: 1.4;
-  color: var(--text);
-  text-align: center;
-  word-break: break-word;
+body.composing .content {
+  opacity: 0.45;
 }
 
-.modal-actions {
-  margin-top: 18px;
+/* Inline delete confirmation (on the row) --------------------------- */
+.todo-item.pending-delete {
+  background: var(--danger-soft);
+  border-radius: 8px;
+  border-bottom-color: transparent;
+}
+
+.todo-item.pending-delete .label {
+  color: var(--danger);
+}
+
+.row-confirm {
+  flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  /* Slide in from the right when the confirmation appears. */
+  animation: rowConfirmIn 0.16s ease;
 }
 
-.btn {
-  flex: 1 1 0;
-  height: 38px;
+@keyframes rowConfirmIn {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.row-confirm-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.rc-btn {
+  height: 26px;
+  padding: 0 10px;
   border: none;
-  border-radius: 9px;
-  font-size: 14px;
+  border-radius: 7px;
+  font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: filter 0.12s ease, background 0.12s ease;
+  transition: filter 0.12s ease;
 }
 
-.btn-ghost {
+.rc-cancel {
   background: var(--line);
   color: var(--text);
 }
 
-.btn-ghost:hover {
-  filter: brightness(0.97);
-}
-
-.btn-danger {
+.rc-delete {
   background: var(--danger);
   color: #fff;
 }
 
-.btn-danger:hover {
+.rc-btn:hover {
   filter: brightness(1.06);
 }
 
