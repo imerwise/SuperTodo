@@ -99,12 +99,17 @@ body {
   line-height: 1;
   padding: 0;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.08s ease;
 }
 
 .nav:hover {
   background: var(--line);
   color: var(--text);
+}
+
+/* Tactile press — the arrow dips under the finger. */
+.nav:active {
+  transform: scale(0.88);
 }
 
 .weekday {
@@ -131,11 +136,15 @@ body {
   padding: 3px 10px;
   border-radius: 999px;
   cursor: pointer;
-  transition: filter 0.12s ease;
+  transition: filter 0.12s ease, transform 0.08s ease;
 }
 
 .today-btn:hover {
   filter: brightness(0.97);
+}
+
+.today-btn:active {
+  transform: scale(0.94);
 }
 
 /* List -------------------------------------------------------------- */
@@ -155,6 +164,9 @@ body {
   gap: 11px;
   padding: 11px 8px;
   border-bottom: 1px solid var(--line);
+  /* Lets the cursor highlight glide between rows during ↑/↓ navigation, which
+     re-highlights existing rows in place (no re-render on that path). */
+  transition: background-color 0.16s ease, color 0.14s ease;
 }
 
 .todo-item:last-child {
@@ -190,6 +202,7 @@ body {
 }
 
 .check {
+  position: relative;
   flex: 0 0 auto;
   width: 22px;
   height: 22px;
@@ -204,6 +217,22 @@ body {
 
 .check:hover {
   border-color: var(--accent);
+}
+
+.check:active {
+  transform: scale(0.85);
+}
+
+/* Ring that ripples outward from the circle when a task is marked done. It
+   only renders during the fx-check pulse (see below). */
+.check::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .check svg {
@@ -226,6 +255,7 @@ body {
 }
 
 .label {
+  position: relative;
   flex: 1 1 auto;
   line-height: 1.35;
   word-break: break-word;
@@ -233,7 +263,20 @@ body {
 
 .todo-item.done .label {
   color: var(--muted);
-  text-decoration: line-through;
+}
+
+/* Strikethrough drawn as an element so it can be wiped in on completion
+   (text-decoration can't animate). Static full-width for already-done rows. */
+.todo-item.done .label::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.68em;
+  width: 100%;
+  height: 1.5px;
+  background: currentColor;
+  transform: scaleX(1);
+  transform-origin: left center;
 }
 
 .badge {
@@ -273,7 +316,11 @@ body {
   cursor: pointer;
   border-radius: 6px;
   padding: 0;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color 0.12s ease, background 0.12s ease, transform 0.08s ease;
+}
+
+.icon-btn:active {
+  transform: scale(0.86);
 }
 
 .icon-btn svg {
@@ -339,11 +386,12 @@ body {
   font-size: 15px;
   outline: none;
   user-select: text;
-  transition: border-color 0.12s ease;
+  transition: border-color 0.12s ease, box-shadow 0.15s ease;
 }
 
 .composer input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .composer input::placeholder {
@@ -469,7 +517,11 @@ body.composing .content {
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: filter 0.12s ease;
+  transition: filter 0.12s ease, transform 0.08s ease;
+}
+
+.rc-btn:active {
+  transform: scale(0.93);
 }
 
 .rc-cancel {
@@ -494,4 +546,159 @@ body.composing .content {
 .content::-webkit-scrollbar-thumb {
   background: var(--line);
   border-radius: 4px;
+}
+
+/* Motion / juice ---------------------------------------------------- */
+/* Each of these plays exactly once, on the single element that just changed.
+   Rows are rebuilt on every render, so a row-level fx-* class is always fresh;
+   the list-level day-slide is retriggered from JS. */
+
+/* Task added: the new row springs down into place. */
+.todo-item.fx-enter {
+  animation: rowIn 0.3s cubic-bezier(0.34, 1.4, 0.62, 1) both;
+}
+
+@keyframes rowIn {
+  from {
+    opacity: 0;
+    transform: translateY(-9px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Marked done: the circle pops, the ✓ springs in, a ring ripples outward. */
+.todo-item.fx-check .check {
+  animation: checkPop 0.34s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.todo-item.fx-check .check svg {
+  animation: checkDraw 0.26s cubic-bezier(0.34, 1.56, 0.64, 1) 0.03s both;
+}
+
+.todo-item.fx-check .check::after {
+  animation: ringRipple 0.5s ease-out;
+}
+
+.todo-item.fx-check .label::after {
+  animation: strikeWipe 0.28s ease 0.04s both;
+}
+
+/* Marked not-done: a gentle settle so the un-check still feels deliberate. */
+.todo-item.fx-uncheck .check {
+  animation: checkSettle 0.24s ease;
+}
+
+@keyframes checkPop {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes checkSettle {
+  0% {
+    transform: scale(0.82);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes checkDraw {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ringRipple {
+  0% {
+    opacity: 0.65;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+}
+
+@keyframes strikeWipe {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* Day navigation: the list slides in from the direction of travel. */
+.todo-list.fx-day-next {
+  animation: dayNext 0.22s ease;
+}
+
+.todo-list.fx-day-prev {
+  animation: dayPrev 0.22s ease;
+}
+
+@keyframes dayNext {
+  from {
+    opacity: 0.4;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dayPrev {
+  from {
+    opacity: 0.4;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Completion-reward particles (spawned in JS on the body, so a re-render can't
+   wipe them mid-flight). */
+.burst-dot {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 9999;
+  will-change: transform, opacity;
+}
+
+/* Honor the OS "reduce motion" setting — snap everything, keep no animation. */
+@media (prefers-reduced-motion: reduce) {
+  .todo-item.fx-enter,
+  .todo-item.fx-check .check,
+  .todo-item.fx-check .check svg,
+  .todo-item.fx-check .check::after,
+  .todo-item.fx-check .label::after,
+  .todo-item.fx-uncheck .check,
+  .todo-list.fx-day-next,
+  .todo-list.fx-day-prev {
+    animation: none;
+  }
 }

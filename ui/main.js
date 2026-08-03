@@ -11,6 +11,10 @@ const nextBtn = document.getElementById("next");
 const todayBtn = document.getElementById("todayBtn");
 const statusEl = document.getElementById("statusbar");
 
+// Respect the OS "reduce motion" setting — when set, every juice effect is
+// skipped and actions apply instantly.
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
 const CHECK_SVG =
   '<svg viewBox="0 0 24 24"><polyline points="4 12 10 18 20 6" /></svg>';
 const PENCIL_SVG =
@@ -37,7 +41,12 @@ function addDays(iso, n) {
   return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
 }
 
-function render(data) {
+// `fx` is an optional one-shot animation hint describing the single thing that
+// just changed, applied to the freshly-built DOM below:
+//   { kind: "add" }                          -> new (last) row springs in
+//   { kind: "toggle", index, nowChecked }    -> that row's check pulses / settles
+//   { kind: "day", dir: -1 | 1 }             -> the list slides in from dir
+function render(data, fx = null) {
   lastData = data;
   current = data.date;
   viewIsPast = data.is_past;
@@ -59,6 +68,7 @@ function render(data) {
     emptyEl.textContent = data.is_today
       ? "Nothing here yet — add your first task below."
       : "No todos for this day.";
+    applyFx(fx); // day slide still plays even with nothing in the list
     updateHints();
     return;
   }
@@ -187,7 +197,82 @@ function render(data) {
     editInputRef.select();
   }
 
+  applyFx(fx);
   updateHints();
+}
+
+// Kick off the one-shot animation for whatever just changed. Row-level classes
+// land on a freshly-built element so they always replay; the list-level day
+// slide is force-restarted with a reflow so rapid navigation re-animates.
+function applyFx(fx) {
+  if (!fx || reduceMotion.matches) return;
+  if (fx.kind === "add") {
+    const row = listEl.lastElementChild;
+    if (row) row.classList.add("fx-enter");
+  } else if (fx.kind === "toggle") {
+    const row = listEl.querySelector(`.todo-item[data-index="${fx.index}"]`);
+    if (row) row.classList.add(fx.nowChecked ? "fx-check" : "fx-uncheck");
+  } else if (fx.kind === "day") {
+    const cls = fx.dir < 0 ? "fx-day-prev" : "fx-day-next";
+    listEl.classList.remove("fx-day-prev", "fx-day-next");
+    void listEl.offsetWidth;
+    listEl.classList.add(cls);
+  }
+}
+
+// A small burst of accent-colored particles from `anchor`'s center — the reward
+// for clearing the last open task of the day. Particles live on <body> so a
+// re-render can't wipe them mid-flight, and remove themselves when done.
+function celebrate(anchor) {
+  if (reduceMotion.matches || !anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const N = 10;
+  for (let i = 0; i < N; i++) {
+    const dot = document.createElement("div");
+    dot.className = "burst-dot";
+    const angle = (Math.PI * 2 * i) / N + Math.random() * 0.5;
+    const dist = 26 + Math.random() * 24;
+    const dx = Math.cos(angle) * dist;
+    const dy = Math.sin(angle) * dist - 12; // bias the spray upward
+    document.body.appendChild(dot);
+    dot
+      .animate(
+        [
+          { transform: `translate(${cx}px, ${cy}px) scale(1)`, opacity: 1 },
+          {
+            transform: `translate(${cx + dx}px, ${cy + dy}px) scale(0.3)`,
+            opacity: 0,
+          },
+        ],
+        {
+          duration: 520 + Math.random() * 240,
+          easing: "cubic-bezier(0.2, 0.6, 0.3, 1)",
+        }
+      )
+      .addEventListener("finish", () => dot.remove());
+  }
+}
+
+// Collapse + slide a row out before the list closes the gap behind it.
+function animateRowOut(row) {
+  return new Promise((resolve) => {
+    const h = row.offsetHeight;
+    row.style.height = h + "px";
+    row.style.overflow = "hidden";
+    void row.offsetWidth; // lock the start height before transitioning
+    row.style.transition =
+      "height 0.2s ease, opacity 0.18s ease, transform 0.18s ease, " +
+      "padding 0.2s ease, margin 0.2s ease";
+    row.style.height = "0px";
+    row.style.paddingTop = "0";
+    row.style.paddingBottom = "0";
+    row.style.marginTop = "0";
+    row.style.opacity = "0";
+    row.style.transform = "translateX(14px)";
+    setTimeout(resolve, 200);
+  });
 }
 
 // --- keyboard selection ---
@@ -292,7 +377,27 @@ async function moveRow(dir) {
   const [moved] = order.splice(from, 1);
   order.splice(to, 0, moved);
   selectedIndex = to;
+
+  // FLIP: remember where every row sits, re-render into the new order, then let
+  // each row glide from its old position to its new one. `order[newPos]` is the
+  // old index (== old DOM position) of whatever now sits at newPos.
+  const beforeTops = [...listEl.children].map(
+    (c) => c.getBoundingClientRect().top
+  );
   render(await invoke("reorder_task", { date: current, order }));
+  if (reduceMotion.matches) return;
+  [...listEl.children].forEach((row, newPos) => {
+    const oldTop = beforeTops[order[newPos]];
+    if (oldTop == null) return;
+    const delta = oldTop - row.getBoundingClientRect().top;
+    if (!delta) return;
+    row.style.transition = "none";
+    row.style.transform = `translateY(${delta}px)`;
+    requestAnimationFrame(() => {
+      row.style.transition = "transform 0.24s cubic-bezier(0.2, 0.7, 0.3, 1)";
+      row.style.transform = "";
+    });
+  });
 }
 
 // --- actions ---
@@ -304,22 +409,36 @@ async function goToday() {
   render(await invoke("get_today"));
 }
 
-async function goTo(iso) {
+// `dir` (-1 back / +1 forward) drives the slide direction; 0 = a plain jump.
+async function goTo(iso, dir = 0) {
   editingIndex = null;
   pendingDeleteIndex = null;
   selectedIndex = null;
   inputEl.blur();
-  render(await invoke("get_day", { date: iso }));
+  render(
+    await invoke("get_day", { date: iso }),
+    dir ? { kind: "day", dir } : null
+  );
 }
 
 async function toggle(index) {
   editingIndex = null;
   pendingDeleteIndex = null;
-  render(await invoke("toggle_task", { date: current, index }));
+  const data = await invoke("toggle_task", { date: current, index });
+  const nowChecked = !!(data.items[index] && data.items[index].checked);
+  render(data, { kind: "toggle", index, nowChecked });
+  // Reward for clearing the day: checking off the final open task.
+  if (nowChecked && data.items.length > 0 && data.items.every((it) => it.checked)) {
+    const row = listEl.querySelector(`.todo-item[data-index="${index}"]`);
+    if (row) celebrate(row.querySelector(".check"));
+  }
 }
 
 async function remove(index) {
   editingIndex = null;
+  // Play the row out before the backend delete + re-render closes the gap.
+  const row = listEl.querySelector(`.todo-item[data-index="${index}"]`);
+  if (row && !reduceMotion.matches) await animateRowOut(row);
   pendingDeleteIndex = null;
   render(await invoke("delete_task", { date: current, index }));
 }
@@ -433,7 +552,8 @@ async function add() {
   editingIndex = null;
   pendingDeleteIndex = null;
   selectedIndex = null;
-  render(await invoke("add_task", { date: current, text }));
+  // New tasks are appended, so the entrance plays on the last row.
+  render(await invoke("add_task", { date: current, text }), { kind: "add" });
   inputEl.focus();
 }
 
@@ -459,8 +579,8 @@ inputEl.addEventListener("blur", () => {
   updateHints();
 });
 
-prevBtn.addEventListener("click", () => goTo(addDays(current, -1)));
-nextBtn.addEventListener("click", () => goTo(addDays(current, 1)));
+prevBtn.addEventListener("click", () => goTo(addDays(current, -1), -1));
+nextBtn.addEventListener("click", () => goTo(addDays(current, 1), 1));
 todayBtn.addEventListener("click", goToday);
 
 document.addEventListener("keydown", (e) => {
@@ -512,18 +632,19 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
       e.preventDefault();
-      if (current) goTo(addDays(current, e.key === "ArrowLeft" ? -7 : 7));
+      const back = e.key === "ArrowLeft";
+      if (current) goTo(addDays(current, back ? -7 : 7), back ? -1 : 1);
       return;
     }
     // Left / right change the viewed day.
     if (e.key === "ArrowLeft") {
       e.preventDefault();
-      if (current) goTo(addDays(current, -1));
+      if (current) goTo(addDays(current, -1), -1);
       return;
     }
     if (e.key === "ArrowRight") {
       e.preventDefault();
-      if (current) goTo(addDays(current, 1));
+      if (current) goTo(addDays(current, 1), 1);
       return;
     }
     if (e.key === "ArrowDown" && n > 0) {
