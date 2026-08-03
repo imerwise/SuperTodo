@@ -9,10 +9,7 @@ const composerEl = document.getElementById("composer");
 const prevBtn = document.getElementById("prev");
 const nextBtn = document.getElementById("next");
 const todayBtn = document.getElementById("todayBtn");
-const confirmEl = document.getElementById("confirm");
-const confirmTextEl = document.getElementById("confirmText");
-const confirmOkBtn = document.getElementById("confirmOk");
-const confirmCancelBtn = document.getElementById("confirmCancel");
+const statusEl = document.getElementById("statusbar");
 
 const CHECK_SVG =
   '<svg viewBox="0 0 24 24"><polyline points="4 12 10 18 20 6" /></svg>';
@@ -29,7 +26,7 @@ let editingIndex = null; // index currently being edited inline, or null
 let cancelEdit = false; // set when an edit is aborted via Escape
 let dragState = null; // active pointer-drag state, or null
 let selectedIndex = null; // keyboard-highlighted row, or null
-let confirmResolver = null; // resolves the open confirm dialog, or null
+let pendingDeleteIndex = null; // row showing inline delete confirmation, or null
 
 // --- date helpers (local, no timezone drift) ---
 function addDays(iso, n) {
@@ -62,13 +59,22 @@ function render(data) {
     emptyEl.textContent = data.is_today
       ? "Nothing here yet — add your first task below."
       : "No todos for this day.";
+    updateHints();
     return;
   }
   emptyEl.hidden = true;
 
-  // Keep the highlight in range if the list shrank.
-  if (selectedIndex !== null && selectedIndex >= data.items.length) {
+  // Cursor is always on a row when there are any: default to the first row,
+  // and keep the highlight in range if the list shrank.
+  if (selectedIndex === null) {
+    selectedIndex = 0;
+  } else if (selectedIndex >= data.items.length) {
     selectedIndex = data.items.length - 1;
+  }
+
+  // Drop a stale pending-delete if its row no longer exists.
+  if (pendingDeleteIndex !== null && pendingDeleteIndex >= data.items.length) {
+    pendingDeleteIndex = null;
   }
 
   let editInputRef = null;
@@ -78,9 +84,9 @@ function render(data) {
     li.className = "todo-item" + (item.checked ? " done" : "");
     li.dataset.index = index;
     if (index === selectedIndex) li.classList.add("selected");
-    // Rows can be dragged to reorder — but not on past days, and not while an
-    // inline edit is open.
-    if (!data.is_past && editingIndex === null) {
+    // Rows can be dragged to reorder — but not on past days, not while an
+    // inline edit is open, and not while a delete confirmation is showing.
+    if (!data.is_past && editingIndex === null && pendingDeleteIndex === null) {
       li.classList.add("reorderable");
       li.addEventListener("pointerdown", onRowPointerDown);
     }
@@ -127,8 +133,31 @@ function render(data) {
         li.appendChild(badge);
       }
 
-      // Edit + delete are only offered on today / future days.
-      if (!data.is_past) {
+      if (!data.is_past && pendingDeleteIndex === index) {
+        // Inline delete confirmation — slides in from the right. Confirm with
+        // the Delete button / key, cancel with Cancel / Esc.
+        li.classList.add("pending-delete");
+        const rc = document.createElement("div");
+        rc.className = "row-confirm";
+
+        const text = document.createElement("span");
+        text.className = "row-confirm-text";
+        text.textContent = "Delete?";
+
+        const cancel = document.createElement("button");
+        cancel.className = "rc-btn rc-cancel";
+        cancel.textContent = "No";
+        cancel.addEventListener("click", cancelPendingDelete);
+
+        const confirm = document.createElement("button");
+        confirm.className = "rc-btn rc-delete";
+        confirm.textContent = "Yes";
+        confirm.addEventListener("click", confirmPendingDelete);
+
+        rc.append(text, cancel, confirm);
+        li.appendChild(rc);
+      } else if (!data.is_past) {
+        // Edit + delete are only offered on today / future days.
         const actions = document.createElement("div");
         actions.className = "actions";
 
@@ -157,6 +186,8 @@ function render(data) {
     editInputRef.focus();
     editInputRef.select();
   }
+
+  updateHints();
 }
 
 // --- keyboard selection ---
@@ -168,9 +199,106 @@ function applySelection() {
   });
 }
 
+// --- contextual key hints (status bar) ---
+function hintHTML(pairs) {
+  return pairs
+    .map(([k, l]) => `<span class="k">${k}</span> ${l}`)
+    .join("  ·  ");
+}
+
+function updateHints() {
+  let pairs;
+  if (pendingDeleteIndex !== null) {
+    pairs = [["⌫", "Delete"], ["Esc", "Cancel"]];
+  } else if (editingIndex !== null) {
+    pairs = [["⏎", "Save"], ["Esc", "Cancel"]];
+  } else if (document.activeElement === inputEl) {
+    pairs = [["⏎", "Add"], ["Esc", "Clear"]];
+  } else {
+    const n = lastData ? lastData.items.length : 0;
+    if (n === 0) {
+      pairs = viewIsPast
+        ? [["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]]
+        : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]];
+    } else if (viewIsPast) {
+      pairs = [
+        ["↑↓", "Move"],
+        ["Space", "Toggle"],
+        ["←→", "Day"],
+        ["⇧←→", "Week"],
+      ];
+    } else {
+      pairs = [
+        ["↑↓", "Move"],
+        ["Space", "Done"],
+        ["⏎", "Edit"],
+        ["⇧↑↓", "Reorder"],
+        ["⌫", "Delete"],
+        ["←→", "Day"],
+        ["⇧←→", "Week"],
+      ];
+    }
+  }
+  statusEl.innerHTML = `<span class="statusbar-track">${hintHTML(pairs)}</span>`;
+  measureHintTicker();
+}
+
+// If the hints are wider than the bar, drive a slow ping-pong scroll (with a
+// short pause at each end via the flat keyframe segments); otherwise the track
+// stays centered and still. Re-measured on every hint change and on resize.
+function measureHintTicker() {
+  const track = statusEl.firstElementChild;
+  if (!track) return;
+  // Reset so the natural (unscrolled) width is what we measure.
+  track.classList.remove("scrolling");
+  statusEl.classList.remove("overflowing");
+  track.style.removeProperty("--hint-shift");
+  track.style.removeProperty("--hint-duration");
+
+  const cs = getComputedStyle(statusEl);
+  const avail =
+    statusEl.clientWidth -
+    parseFloat(cs.paddingLeft) -
+    parseFloat(cs.paddingRight);
+  const overflow = track.scrollWidth - avail;
+  if (overflow <= 1) return;
+
+  const distance = overflow + 2; // a hair of breathing room at the far end
+  const pxPerSecond = 35; // slow, readable
+  const oneWaySeconds = distance / pxPerSecond;
+  // The moving portion of each cycle spans ~38% of the keyframe (12%→50%),
+  // so the full cycle is oneWay / 0.38, floored so short overflows aren't zippy.
+  const duration = Math.max(7, oneWaySeconds / 0.38);
+
+  track.style.setProperty("--hint-shift", `-${distance}px`);
+  track.style.setProperty("--hint-duration", `${duration.toFixed(1)}s`);
+  statusEl.classList.add("overflowing");
+  track.classList.add("scrolling");
+}
+
+window.addEventListener("resize", measureHintTicker);
+
+// Move the highlighted row up (-1) or down (+1), wrapping at the ends. The
+// cursor follows the moved task to its new position.
+async function moveRow(dir) {
+  if (viewIsPast || editingIndex !== null || selectedIndex === null) return;
+  const n = lastData ? lastData.items.length : 0;
+  if (n < 2) return;
+  const from = selectedIndex;
+  let to = from + dir;
+  if (to < 0) to = n - 1; // wrap top -> bottom
+  else if (to > n - 1) to = 0; // wrap bottom -> top
+  const order = Array.from({ length: n }, (_, i) => i);
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+  selectedIndex = to;
+  render(await invoke("reorder_task", { date: current, order }));
+}
+
 // --- actions ---
 async function goToday() {
   editingIndex = null;
+  pendingDeleteIndex = null;
   selectedIndex = null;
   inputEl.blur();
   render(await invoke("get_today"));
@@ -178,6 +306,7 @@ async function goToday() {
 
 async function goTo(iso) {
   editingIndex = null;
+  pendingDeleteIndex = null;
   selectedIndex = null;
   inputEl.blur();
   render(await invoke("get_day", { date: iso }));
@@ -185,43 +314,39 @@ async function goTo(iso) {
 
 async function toggle(index) {
   editingIndex = null;
+  pendingDeleteIndex = null;
   render(await invoke("toggle_task", { date: current, index }));
 }
 
 async function remove(index) {
   editingIndex = null;
+  pendingDeleteIndex = null;
   render(await invoke("delete_task", { date: current, index }));
 }
 
-// Confirmation dialog shared by the trash icon and the Delete key.
-function openConfirm(message) {
-  confirmTextEl.textContent = message;
-  confirmEl.hidden = false;
-  confirmOkBtn.focus();
-  return new Promise((resolve) => {
-    confirmResolver = resolve;
-  });
-}
-
-function closeConfirm(result) {
-  confirmEl.hidden = true;
-  const resolve = confirmResolver;
-  confirmResolver = null;
-  if (resolve) resolve(result);
-}
-
-async function requestDelete(index) {
+// Inline delete confirmation, shown on the row itself (see render). The trash
+// icon and the Delete key both arm it; Delete/Esc (or the buttons) decide.
+function requestDelete(index) {
   if (viewIsPast) return; // past days are review-only
-  const item = lastData && lastData.items[index];
-  const message = item
-    ? `Delete “${item.text}”?`
-    : "Delete this task?";
-  const ok = await openConfirm(message);
-  if (ok) remove(index);
+  selectedIndex = index; // keep the cursor on the row being confirmed
+  pendingDeleteIndex = index;
+  render(lastData);
+}
+
+function cancelPendingDelete() {
+  if (pendingDeleteIndex === null) return;
+  pendingDeleteIndex = null;
+  render(lastData);
+}
+
+function confirmPendingDelete() {
+  if (pendingDeleteIndex === null) return;
+  remove(pendingDeleteIndex);
 }
 
 function startEdit(index) {
   editingIndex = index;
+  pendingDeleteIndex = null;
   render(lastData);
 }
 
@@ -306,6 +431,7 @@ async function add() {
   if (!text) return;
   inputEl.value = "";
   editingIndex = null;
+  pendingDeleteIndex = null;
   selectedIndex = null;
   render(await invoke("add_task", { date: current, text }));
   inputEl.focus();
@@ -322,26 +448,32 @@ inputEl.addEventListener("keydown", (e) => {
     inputEl.blur();
   }
 });
+// Dim the list while the add box is focused so the composer stands out; the
+// highlighted row stays highlighted underneath. Hints switch to "add" mode.
+inputEl.addEventListener("focus", () => {
+  document.body.classList.add("composing");
+  updateHints();
+});
+inputEl.addEventListener("blur", () => {
+  document.body.classList.remove("composing");
+  updateHints();
+});
+
 prevBtn.addEventListener("click", () => goTo(addDays(current, -1)));
 nextBtn.addEventListener("click", () => goTo(addDays(current, 1)));
 todayBtn.addEventListener("click", goToday);
 
-confirmOkBtn.addEventListener("click", () => closeConfirm(true));
-confirmCancelBtn.addEventListener("click", () => closeConfirm(false));
-confirmEl.addEventListener("pointerdown", (e) => {
-  if (e.target === confirmEl) closeConfirm(false); // click outside the card
-});
-
 document.addEventListener("keydown", (e) => {
-  // While the confirm dialog is open it captures the keyboard: Enter confirms,
-  // Escape cancels, everything else is swallowed.
-  if (confirmResolver !== null) {
-    if (e.key === "Enter") {
+  // While a row's inline delete confirmation is showing it captures the
+  // keyboard: Delete/Backspace confirms, Escape cancels, everything else
+  // (including Enter) is swallowed so nothing acts on the row mid-decision.
+  if (pendingDeleteIndex !== null) {
+    if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      closeConfirm(true);
+      confirmPendingDelete();
     } else if (e.key === "Escape") {
       e.preventDefault();
-      closeConfirm(false);
+      cancelPendingDelete();
     }
     return;
   }
@@ -358,13 +490,31 @@ document.addEventListener("keydown", (e) => {
   const tag = document.activeElement && document.activeElement.tagName;
   const inField = tag === "INPUT" || tag === "TEXTAREA";
 
-  // Keyboard list navigation (only when not typing in a field or mid-edit):
-  //   Down  -> next row (first row if nothing selected yet)
-  //   Up    -> previous row (last row if nothing selected yet)
-  //   Enter -> edit the highlighted row
-  //   Esc   -> cancel the navigation / clear the highlight
+  // Keyboard list navigation (only when not typing in a field or mid-edit).
+  // The cursor is always on a row when the list is non-empty; movement and
+  // reordering wrap around at the ends.
+  //   ↑ / ↓        -> move the cursor (wraps)
+  //   ⇧↑ / ⇧↓      -> move the highlighted task (wraps, today/future only)
+  //   ← / →        -> change the viewed day (±1 day)
+  //   ⇧← / ⇧→      -> jump a week (±7 days)
+  //   Space        -> toggle done / not-done
+  //   Enter        -> edit the highlighted row
+  //   Delete/⌫     -> delete the highlighted row
   if (!inField && editingIndex === null) {
     const n = lastData ? lastData.items.length : 0;
+    // Shift modifies the arrows: Up/Down reorders the highlighted task,
+    // Left/Right jumps a whole week. Checked before the plain arrows so the
+    // modifier wins.
+    if (e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      moveRow(e.key === "ArrowUp" ? -1 : 1);
+      return;
+    }
+    if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      if (current) goTo(addDays(current, e.key === "ArrowLeft" ? -7 : 7));
+      return;
+    }
     // Left / right change the viewed day.
     if (e.key === "ArrowLeft") {
       e.preventDefault();
@@ -378,15 +528,14 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.key === "ArrowDown" && n > 0) {
       e.preventDefault();
-      selectedIndex =
-        selectedIndex === null ? 0 : Math.min(n - 1, selectedIndex + 1);
+      selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
       applySelection();
       return;
     }
     if (e.key === "ArrowUp" && n > 0) {
       e.preventDefault();
       selectedIndex =
-        selectedIndex === null ? n - 1 : Math.max(0, selectedIndex - 1);
+        selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
       applySelection();
       return;
     }
@@ -410,12 +559,6 @@ document.addEventListener("keydown", (e) => {
       requestDelete(selectedIndex);
       return;
     }
-    if (e.key === "Escape" && selectedIndex !== null) {
-      e.preventDefault();
-      selectedIndex = null;
-      applySelection();
-      return;
-    }
   }
 
   // Start typing anywhere (not while editing / in a field) to fill the add
@@ -423,11 +566,8 @@ document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
   if (viewIsPast) return;
   if (inField) return;
-  // Typing starts a new task, so drop any row highlight.
-  if (selectedIndex !== null) {
-    selectedIndex = null;
-    applySelection();
-  }
+  // Keep the row highlighted while typing; focusing the add box dims the list
+  // (see the input focus handler) so the composer stands out.
   e.preventDefault();
   inputEl.value += e.key;
   inputEl.focus();
