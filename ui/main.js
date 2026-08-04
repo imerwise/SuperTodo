@@ -87,6 +87,7 @@ let pendingDeleteIndex = null; // row showing inline delete confirmation, or nul
 // Idea state.
 let ideas = []; // list of IdeaListEntry
 let ideaDetailSlug = null; // slug of idea being viewed in detail, or null
+let ideaDetailSourceIndex = null; // index in ideas[] when entering detail, for re-selecting on back
 let ideaDetailDirty = false; // whether detail has unsaved changes
 let emojiPickerTarget = null; // { slug, callback } for the active picker
 
@@ -400,6 +401,7 @@ function renderIdeas(data) {
 function renderIdeaDetail(slug) {
   console.log("[ui] renderIdeaDetail: slug=", slug);
   ideaDetailSlug = slug;
+  ideaDetailSourceIndex = selectedIndex;
   ideaDetailDirty = false;
   pendingDeleteIndex = null;
   editingIndex = null;
@@ -502,6 +504,7 @@ function renderIdeaDetail(slug) {
     detail.appendChild(textarea);
 
     listEl.appendChild(detail);
+    textarea.focus();
     updateHints();
   });
 }
@@ -587,12 +590,15 @@ async function addIdea(text) {
     console.log("[ui] addIdea: empty text, returning");
     return;
   }
-  selectedIndex = 0;
   console.log("[ui] addIdea: invoking add_idea with title=", text);
-  ideas = await invoke("add_idea", { title: text });
-  console.log("[ui] addIdea: got", ideas.length, "ideas back", ideas.map(i => i.title));
-  renderIdeas(ideas);
-  console.log("[ui] addIdea: done (blurring input)");
+  const result = await invoke("add_idea", { title: text });
+  ideas = result.entries;
+  // Find the exact index of the new idea in the sorted list
+  const newIndex = ideas.findIndex(e => e.slug === result.new_slug);
+  selectedIndex = newIndex >= 0 ? newIndex : 0;
+  console.log("[ui] addIdea: got", ideas.length, "ideas, new_slug=", result.new_slug, "newIndex=", selectedIndex);
+  renderIdeaDetail(result.new_slug);
+  console.log("[ui] addIdea: done");
 }
 
 async function editIdea(slug, emoji, title, description) {
@@ -654,6 +660,13 @@ async function switchMode(newMode) {
   ideaDetailSlug = null;
   inputEl.blur();
 
+  // If coming back from idea detail, re-select the source idea
+  const restoreIdeaIndex = newMode === "ideas" && ideaDetailSourceIndex !== null
+    ? ideaDetailSourceIndex : null;
+  const detailSlug = ideaDetailSlug;
+  ideaDetailSourceIndex = null;
+  ideaDetailSlug = null;
+
   mode = newMode;
 
   if (mode === "ideas") {
@@ -665,6 +678,12 @@ async function switchMode(newMode) {
     console.log("[ui] switchMode: fetching ideas...");
     ideas = await invoke("get_ideas");
     console.log("[ui] switchMode: got", ideas.length, "ideas", ideas);
+    if (restoreIdeaIndex !== null && restoreIdeaIndex < ideas.length) {
+      selectedIndex = restoreIdeaIndex;
+    } else if (detailSlug) {
+      const found = ideas.findIndex(e => e.slug === detailSlug);
+      if (found >= 0) selectedIndex = found;
+    }
     renderIdeas(ideas);
   } else {
     prevBtn.style.display = "";

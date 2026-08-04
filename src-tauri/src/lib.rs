@@ -542,13 +542,20 @@ fn get_ideas() -> Vec<IdeaListEntry> {
     entries
 }
 
+#[derive(Serialize)]
+struct AddIdeaResult {
+    entries: Vec<IdeaListEntry>,
+    new_slug: String,
+}
+
 #[tauri::command]
-fn add_idea(title: String) -> Vec<IdeaListEntry> {
+fn add_idea(title: String) -> AddIdeaResult {
     eprintln!("[ideas] COMMAND add_idea: title={:?}", title);
     let title = title.trim().to_string();
     if title.is_empty() {
         eprintln!("[ideas] COMMAND add_idea: empty title, returning existing ideas");
-        return get_ideas();
+        let entries = get_ideas();
+        return AddIdeaResult { entries, new_slug: String::new() };
     }
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
@@ -568,6 +575,7 @@ fn add_idea(title: String) -> Vec<IdeaListEntry> {
     };
     write_idea_md(&ideas, &idea);
 
+    let slug_copy = slug.clone();
     entries.push(IdeaListEntry {
         slug,
         emoji: String::from("💡"),
@@ -577,7 +585,7 @@ fn add_idea(title: String) -> Vec<IdeaListEntry> {
     write_ideas_index(&dir, &entries);
     let result = read_ideas_index(&dir);
     eprintln!("[ideas] COMMAND add_idea: done, {} entries total", result.len());
-    result
+    AddIdeaResult { entries: result, new_slug: slug_copy }
 }
 
 #[tauri::command]
