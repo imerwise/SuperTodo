@@ -304,13 +304,37 @@ function applySelection() {
 }
 
 // --- contextual key hints (status bar) ---
+
+let optionMenuActive = false;
+
+function showOptionMenu() {
+  optionMenuActive = true;
+  const notToday = lastData && !lastData.is_today;
+  const html = notToday
+    ? '<span style="color:var(--accent);font-weight:700">H</span>ome'
+    : 'No command available';
+  updateHints(html);
+}
+
+function hideOptionMenu() {
+  optionMenuActive = false;
+  updateHints();
+}
+
 function hintHTML(pairs) {
   return pairs
     .map(([k, l]) => `<span class="k">${k}</span> ${l}`)
     .join("  ·  ");
 }
 
-function updateHints() {
+function updateHints(force = null) {
+  // If force is set, show that content instead of standard hints.
+  if (force !== null) {
+    statusEl.innerHTML = `<span class="statusbar-track">${force}</span>`;
+    measureHintTicker();
+    return;
+  }
+
   let pairs;
   if (pendingDeleteIndex !== null) {
     pairs = [["⌫", "Delete"], ["Esc", "Cancel"]];
@@ -320,17 +344,20 @@ function updateHints() {
     pairs = [["⏎", "Add"], ["Esc", "Clear"]];
   } else {
     const n = lastData ? lastData.items.length : 0;
+    const notToday = lastData && !lastData.is_today;
     if (n === 0) {
-      pairs = viewIsPast
-        ? [["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]]
-        : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"], ["⌥H", "Today"]];
+      const base = viewIsPast
+        ? [["←→", "Day"], ["⇧←→", "Week"]]
+        : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"]];
+      if (notToday) base.push(["⌥Menu", "Home"]);
+      pairs = base;
     } else if (viewIsPast) {
-      // Past days are review-only — no toggling, so no Space hint.
       pairs = [
         ["↑↓", "Move"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
       ];
+      if (notToday) pairs.push(["⌥Menu", "Home"]);
     } else {
       pairs = [
         ["↑↓", "Move"],
@@ -341,6 +368,7 @@ function updateHints() {
         ["←→", "Day"],
         ["⇧←→", "Week"],
       ];
+      if (notToday) pairs.push(["⌥Menu", "Home"]);
     }
   }
   statusEl.innerHTML = `<span class="statusbar-track">${hintHTML(pairs)}</span>`;
@@ -424,6 +452,7 @@ async function goToday() {
   editingIndex = null;
   pendingDeleteIndex = null;
   selectedIndex = null;
+  optionMenuActive = false;
   inputEl.blur();
   render(await invoke("get_today"));
 }
@@ -617,11 +646,18 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // Option (⌥) shortcut: H = jump to today.
-  if (e.altKey) {
-    if (e.code === "KeyH") {
+  // Option (⌥) held: show the option menu in the hint bar.
+  // While held, pressing a command key (e.g. H) executes it immediately.
+  if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    const tag = document.activeElement && document.activeElement.tagName;
+    const inField = tag === "INPUT" || tag === "TEXTAREA";
+    if (!inField && editingIndex === null) {
       e.preventDefault();
-      goToday();
+      showOptionMenu();
+      // Check for command keys pressed while Option is held.
+      if (e.code === "KeyH") {
+        goToday();
+      }
     }
     return;
   }
@@ -711,6 +747,13 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   inputEl.value += e.key;
   inputEl.focus();
+});
+
+// Release Option (⌥) hides the option menu.
+document.addEventListener("keyup", (e) => {
+  if (e.key === "Alt" && optionMenuActive) {
+    hideOptionMenu();
+  }
 });
 
 goToday();
