@@ -208,44 +208,18 @@ fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
     let path = idea_file_path(ideas, slug);
     eprintln!("[ideas] read_idea_md: slug={} path={}", slug, path.display());
     let content = fs::read_to_string(&path).ok()?;
-    eprintln!("[ideas] read_idea_md: raw content ({} bytes): {:?}", content.len(), &content[..content.len().min(200)]);
 
-    // Parse frontmatter: ---\nemoji: ...\ncreated: ...\n---
-    let body = if let Some(rest) = content.strip_prefix("---\n") {
-        let mut parts = rest.splitn(2, "\n---\n");
-        let header = parts.next().unwrap_or("");
-        let md_body = parts.next().unwrap_or("");
-        let mut emoji = String::from("💡");
-        let mut created = String::new();
-        for line in header.lines() {
-            if let Some(val) = line.strip_prefix("emoji: ") {
-                emoji = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("created: ") {
-                created = val.trim().to_string();
-            }
-        }
-        eprintln!("[ideas] read_idea_md: frontmatter parsed emoji={} created={}", emoji, created);
-        (md_body.to_string(), emoji, created)
-    } else {
-        eprintln!("[ideas] read_idea_md: no frontmatter found, treating whole file as body");
-        (content.clone(), "💡".to_string(), String::new())
-    };
-
-    let (md_body, emoji, created) = body;
-
-    // Trim leading blank lines, then find the first # Title line
-    let md_body = md_body.trim();
-    let (title, description) = if let Some(idx) = md_body.find('\n') {
-        let first_line = md_body[..idx].trim();
-        let rest = md_body[idx..].trim().to_string();
+    // First line starting with # is the title, rest is description body.
+    let trimmed = content.trim();
+    let (title, description) = if let Some(idx) = trimmed.find('\n') {
+        let first_line = trimmed[..idx].trim();
+        let rest = trimmed[idx..].trim().to_string();
         if first_line.starts_with("# ") {
             (first_line[2..].trim().to_string(), rest)
         } else {
-            // No # title, treat first non-empty line as title
             (first_line.to_string(), rest)
         }
     } else {
-        let trimmed = md_body.trim();
         if trimmed.starts_with("# ") {
             (trimmed[2..].trim().to_string(), String::new())
         } else {
@@ -253,27 +227,28 @@ fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
         }
     };
 
-    eprintln!("[ideas] read_idea_md: parsed title={:?} description_len={} emoji={} created={}",
-        title, description.len(), emoji, created);
+    eprintln!("[ideas] read_idea_md: parsed title={:?} description_len={}",
+        title, description.len());
 
     Some(IdeaData {
         slug: slug.to_string(),
-        emoji,
+        emoji: String::new(), // not stored in file anymore
         title,
         description,
-        created,
+        created: String::new(), // not stored in file anymore
     })
 }
 
 fn write_idea_md(ideas: &PathBuf, idea: &IdeaData) {
     let path = idea_file_path(ideas, &idea.slug);
-    let content = format!(
-        "---\nemoji: {}\ncreated: {}\n---\n\n# {}\n\n{}",
-        idea.emoji, idea.created, idea.title, idea.description
-    );
+    let content = if idea.description.is_empty() {
+        format!("# {}", idea.title)
+    } else {
+        format!("# {}\n\n{}", idea.title, idea.description)
+    };
     let final_content = content.trim().to_string() + "\n";
-    eprintln!("[ideas] write_idea_md: slug={} path={} title={:?} emoji={} desc_len={} content_len={}",
-        idea.slug, path.display(), idea.title, idea.emoji, idea.description.len(), final_content.len());
+    eprintln!("[ideas] write_idea_md: slug={} path={} title={:?} desc_len={} content_len={}",
+        idea.slug, path.display(), idea.title, idea.description.len(), final_content.len());
     let _ = fs::write(&path, final_content);
 }
 
@@ -593,9 +568,15 @@ fn get_idea(slug: String) -> Option<IdeaData> {
     eprintln!("[ideas] COMMAND get_idea: slug={}", slug);
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
-    let result = read_idea_md(&ideas, &slug);
-    eprintln!("[ideas] COMMAND get_idea: result={:?}", result.as_ref().map(|r| (&r.title, &r.emoji, r.description.len())));
-    result
+    let mut result = read_idea_md(&ideas, &slug)?;
+    // Merge in emoji and created from the index
+    let entries = read_ideas_index(&dir);
+    if let Some(entry) = entries.iter().find(|e| e.slug == slug) {
+        result.emoji = entry.emoji.clone();
+        result.created = entry.created.clone();
+    }
+    eprintln!("[ideas] COMMAND get_idea: result={:?}", (&result.title, &result.emoji, result.description.len()));
+    Some(result)
 }
 
 #[derive(Serialize)]
