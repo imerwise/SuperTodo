@@ -825,22 +825,25 @@ body.composing .content {
   height: 34px;
   display: grid;
   place-items: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.idea-emoji-btn {
+  cursor: pointer;
   border: none;
   border-radius: 8px;
   background: var(--line);
-  cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
   padding: 0;
   transition: transform 0.08s ease, background 0.12s ease;
 }
 
-.idea-emoji:hover {
+.idea-emoji-btn:hover {
   background: var(--accent-soft);
   transform: scale(1.05);
 }
 
-.idea-emoji:active {
+.idea-emoji-btn:active {
   transform: scale(0.88);
 }
 
