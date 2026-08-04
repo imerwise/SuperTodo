@@ -159,6 +159,7 @@ body {
 }
 
 .todo-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 11px;
@@ -194,7 +195,6 @@ body {
 
 .todo-item.selected .label {
   color: var(--accent);
-  font-weight: 600;
 }
 
 .todo-item.selected .check {
@@ -324,6 +324,9 @@ body {
 
 .badge {
   flex: 0 0 auto;
+  /* Pin the badge to the right edge regardless of task text length. */
+  margin-left: auto;
+  transition: opacity 0.12s ease;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -341,8 +344,14 @@ body {
   background: var(--line);
 }
 
+/* Actions live out of the layout flow, pinned to the right edge, so they don't
+   reserve a permanent gutter that would hold the status badge off the edge.
+   They fade in on hover and swap places with the badge (below). */
 .actions {
-  flex: 0 0 auto;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   gap: 2px;
   opacity: 0;
@@ -352,6 +361,13 @@ body {
 .todo-item:hover .actions,
 .todo-item:focus-within .actions {
   opacity: 1;
+}
+
+/* On hover the edit/delete actions occupy the right edge, so fade the status
+   badge out to make room (only on editable rows that actually have actions). */
+.todo-item:not(.past):not(.pending-delete):hover .badge,
+.todo-item:not(.past):not(.pending-delete):focus-within .badge {
+  opacity: 0;
 }
 
 .icon-btn {
