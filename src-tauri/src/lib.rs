@@ -1,5 +1,5 @@
-use chrono::{Local, NaiveDate};
-use serde::Serialize;
+use chrono::{Local, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
@@ -39,6 +39,25 @@ struct DayData {
     is_past: bool,
     exists: bool,
     items: Vec<TodoItem>,
+}
+
+// --- idea types ------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct IdeaData {
+    slug: String,
+    emoji: String,
+    title: String,
+    description: String,
+    created: String, // ISO date "2026-08-04"
+}
+
+#[derive(Serialize, Deserialize)]
+struct IdeaListEntry {
+    slug: String,
+    emoji: String,
+    title: String,
+    created: String,
 }
 
 // --- paths -----------------------------------------------------------------
@@ -126,6 +145,149 @@ fn write_items(path: &PathBuf, items: &[TodoItem]) {
         out.push('\n');
     }
     let _ = fs::write(path, out);
+}
+
+// --- ideas helpers ---------------------------------------------------------
+
+fn ideas_dir(dir: &PathBuf) -> PathBuf {
+    let ideas = dir.join("ideas");
+    let _ = fs::create_dir_all(&ideas);
+    ideas
+}
+
+fn ideas_index_path(dir: &PathBuf) -> PathBuf {
+    ideas_dir(dir).join("ideas_index.json")
+}
+
+fn idea_file_path(ideas: &PathBuf, slug: &str) -> PathBuf {
+    ideas.join(format!("{}.md", slug))
+}
+
+fn slugify(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join("-");
+    let result = if slug.is_empty() { "untitled".to_string() } else { slug };
+    eprintln!("[ideas] slugify: {:?} -> {}", title, result);
+    result
+}
+
+fn read_ideas_index(dir: &PathBuf) -> Vec<IdeaListEntry> {
+    let path = ideas_index_path(dir);
+    let mut entries: Vec<IdeaListEntry> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    eprintln!("[ideas] read_ideas_index: {} entries from {}", entries.len(), path.display());
+    // Sort descending by created date (newest first), then by slug for stable
+    // ordering within the same day.
+    entries.sort_by(|a, b| b.created.cmp(&a.created).then(a.slug.cmp(&b.slug)));
+    entries
+}
+
+fn write_ideas_index(dir: &PathBuf, entries: &[IdeaListEntry]) {
+    let path = ideas_index_path(dir);
+    eprintln!("[ideas] write_ideas_index: {} entries to {}", entries.len(), path.display());
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
+    let path = idea_file_path(ideas, slug);
+    eprintln!("[ideas] read_idea_md: slug={} path={}", slug, path.display());
+    let content = fs::read_to_string(&path).ok()?;
+    eprintln!("[ideas] read_idea_md: raw content ({} bytes): {:?}", content.len(), &content[..content.len().min(200)]);
+
+    // Parse frontmatter: ---\nemoji: ...\ncreated: ...\n---
+    let body = if let Some(rest) = content.strip_prefix("---\n") {
+        let mut parts = rest.splitn(2, "\n---\n");
+        let header = parts.next().unwrap_or("");
+        let md_body = parts.next().unwrap_or("");
+        let mut emoji = String::from("💡");
+        let mut created = String::new();
+        for line in header.lines() {
+            if let Some(val) = line.strip_prefix("emoji: ") {
+                emoji = val.trim().to_string();
+            } else if let Some(val) = line.strip_prefix("created: ") {
+                created = val.trim().to_string();
+            }
+        }
+        eprintln!("[ideas] read_idea_md: frontmatter parsed emoji={} created={}", emoji, created);
+        (md_body.to_string(), emoji, created)
+    } else {
+        eprintln!("[ideas] read_idea_md: no frontmatter found, treating whole file as body");
+        (content.clone(), "💡".to_string(), String::new())
+    };
+
+    let (md_body, emoji, created) = body;
+
+    // Trim leading blank lines, then find the first # Title line
+    let md_body = md_body.trim();
+    let (title, description) = if let Some(idx) = md_body.find('\n') {
+        let first_line = md_body[..idx].trim();
+        let rest = md_body[idx..].trim().to_string();
+        if first_line.starts_with("# ") {
+            (first_line[2..].trim().to_string(), rest)
+        } else {
+            // No # title, treat first non-empty line as title
+            (first_line.to_string(), rest)
+        }
+    } else {
+        let trimmed = md_body.trim();
+        if trimmed.starts_with("# ") {
+            (trimmed[2..].trim().to_string(), String::new())
+        } else {
+            (trimmed.to_string(), String::new())
+        }
+    };
+
+    eprintln!("[ideas] read_idea_md: parsed title={:?} description_len={} emoji={} created={}",
+        title, description.len(), emoji, created);
+
+    Some(IdeaData {
+        slug: slug.to_string(),
+        emoji,
+        title,
+        description,
+        created,
+    })
+}
+
+fn write_idea_md(ideas: &PathBuf, idea: &IdeaData) {
+    let path = idea_file_path(ideas, &idea.slug);
+    let content = format!(
+        "---\nemoji: {}\ncreated: {}\n---\n\n# {}\n\n{}",
+        idea.emoji, idea.created, idea.title, idea.description
+    );
+    let final_content = content.trim().to_string() + "\n";
+    eprintln!("[ideas] write_idea_md: slug={} path={} title={:?} emoji={} desc_len={} content_len={}",
+        idea.slug, path.display(), idea.title, idea.emoji, idea.description.len(), final_content.len());
+    let _ = fs::write(&path, final_content);
+}
+
+/// Generate a unique slug by appending -N if the slug already exists in the index.
+fn unique_slug(_dir: &PathBuf, base: &str, entries: &[IdeaListEntry]) -> String {
+    eprintln!("[ideas] unique_slug: base={} existing_entries={}", base, entries.len());
+    let mut slug = base.to_string();
+    let mut counter = 1;
+    while entries.iter().any(|e| e.slug == slug) {
+        slug = format!("{}-{}", base, counter);
+        counter += 1;
+    }
+    eprintln!("[ideas] unique_slug: result={}", slug);
+    slug
 }
 
 // --- carry-over ------------------------------------------------------------
@@ -369,6 +531,150 @@ fn delete_task(date: String, index: usize) -> DayData {
     build_day(d)
 }
 
+// --- idea commands ---------------------------------------------------------
+
+#[tauri::command]
+fn get_ideas() -> Vec<IdeaListEntry> {
+    eprintln!("[ideas] COMMAND get_ideas");
+    let dir = storage_dir();
+    let entries = read_ideas_index(&dir);
+    eprintln!("[ideas] COMMAND get_ideas: returning {} entries", entries.len());
+    entries
+}
+
+#[tauri::command]
+fn add_idea(title: String) -> Vec<IdeaListEntry> {
+    eprintln!("[ideas] COMMAND add_idea: title={:?}", title);
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        eprintln!("[ideas] COMMAND add_idea: empty title, returning existing ideas");
+        return get_ideas();
+    }
+    let dir = storage_dir();
+    let ideas = ideas_dir(&dir);
+    eprintln!("[ideas] COMMAND add_idea: ideas_dir={}", ideas.display());
+    let mut entries = read_ideas_index(&dir);
+    let base = slugify(&title);
+    let slug = unique_slug(&dir, &base, &entries);
+    let created = Utc::now().format("%Y-%m-%d").to_string();
+    eprintln!("[ideas] COMMAND add_idea: slug={} created={}", slug, created);
+
+    let idea = IdeaData {
+        slug: slug.clone(),
+        emoji: String::from("💡"),
+        title: title.clone(),
+        description: String::new(),
+        created: created.clone(),
+    };
+    write_idea_md(&ideas, &idea);
+
+    entries.push(IdeaListEntry {
+        slug,
+        emoji: String::from("💡"),
+        title,
+        created,
+    });
+    write_ideas_index(&dir, &entries);
+    let result = read_ideas_index(&dir);
+    eprintln!("[ideas] COMMAND add_idea: done, {} entries total", result.len());
+    result
+}
+
+#[tauri::command]
+fn get_idea(slug: String) -> Option<IdeaData> {
+    eprintln!("[ideas] COMMAND get_idea: slug={}", slug);
+    let dir = storage_dir();
+    let ideas = ideas_dir(&dir);
+    let result = read_idea_md(&ideas, &slug);
+    eprintln!("[ideas] COMMAND get_idea: result={:?}", result.as_ref().map(|r| (&r.title, &r.emoji, r.description.len())));
+    result
+}
+
+#[derive(Serialize)]
+struct EditIdeaResult {
+    entries: Vec<IdeaListEntry>,
+    new_slug: Option<String>,
+}
+
+#[tauri::command]
+fn edit_idea(slug: String, emoji: Option<String>, title: Option<String>, description: Option<String>) -> EditIdeaResult {
+    eprintln!("[ideas] COMMAND edit_idea: slug={} emoji={:?} title={:?} description_len={:?}", slug, emoji, title, description.as_ref().map(|d| d.len()));
+    let dir = storage_dir();
+    let ideas = ideas_dir(&dir);
+    let mut entries = read_ideas_index(&dir);
+
+    let entry_idx = entries.iter().position(|e| e.slug == slug);
+    if entry_idx.is_none() {
+        eprintln!("[ideas] COMMAND edit_idea: slug not found in index, returning {} entries", entries.len());
+        return EditIdeaResult { entries, new_slug: None };
+    }
+    let idx = entry_idx.unwrap();
+
+    let mut idea = match read_idea_md(&ideas, &slug) {
+        Some(i) => i,
+        None => {
+            eprintln!("[ideas] COMMAND edit_idea: .md file not found, returning {} entries", entries.len());
+            return EditIdeaResult { entries, new_slug: None };
+        }
+    };
+
+    let mut slug_changed = false;
+    let mut new_slug = None;
+
+    if let Some(e) = emoji {
+        if !e.is_empty() {
+            idea.emoji = e.clone();
+            entries[idx].emoji = e;
+        }
+    }
+    if let Some(t) = title {
+        if !t.is_empty() && t != idea.title {
+            // Compute new slug, delete old file, update entry
+            let base = slugify(&t);
+            let slug_no_counter = unique_slug(&dir, &base, &entries);
+            let old_path = idea_file_path(&ideas, &slug);
+            let _ = fs::remove_file(&old_path);
+            idea.title = t.clone();
+            idea.slug = slug_no_counter.clone();
+            entries[idx].slug = slug_no_counter.clone();
+            entries[idx].title = t;
+            new_slug = Some(slug_no_counter);
+            slug_changed = true;
+        }
+    }
+    if let Some(d) = description {
+        idea.description = d;
+    }
+
+    write_idea_md(&ideas, &idea);
+    if !slug_changed {
+        write_ideas_index(&dir, &entries);
+    } else {
+        // Re-read and re-write to ensure proper sort
+        let _ = write_ideas_index(&dir, &entries);
+        entries = read_ideas_index(&dir);
+    }
+    eprintln!("[ideas] COMMAND edit_idea: done, {} entries, new_slug={:?}", entries.len(), new_slug);
+    EditIdeaResult { entries, new_slug }
+}
+
+#[tauri::command]
+fn delete_idea(slug: String) -> Vec<IdeaListEntry> {
+    eprintln!("[ideas] COMMAND delete_idea: slug={}", slug);
+    let dir = storage_dir();
+    let ideas = ideas_dir(&dir);
+    let mut entries = read_ideas_index(&dir);
+
+    let path = idea_file_path(&ideas, &slug);
+    eprintln!("[ideas] COMMAND delete_idea: removing file {}", path.display());
+    let _ = fs::remove_file(&path);
+
+    entries.retain(|e| e.slug != slug);
+    write_ideas_index(&dir, &entries);
+    eprintln!("[ideas] COMMAND delete_idea: done, {} entries remaining", entries.len());
+    entries
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -380,7 +686,12 @@ pub fn run() {
             edit_task,
             reorder_task,
             toggle_task,
-            delete_task
+            delete_task,
+            get_ideas,
+            add_idea,
+            get_idea,
+            edit_idea,
+            delete_idea
         ])
         .run(tauri::generate_context!())
         .expect("error while running SuperTodo");

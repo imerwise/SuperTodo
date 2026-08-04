@@ -2,6 +2,7 @@ const { invoke } = window.__TAURI__.core;
 
 const weekdayEl = document.getElementById("weekday");
 const dateEl = document.getElementById("date");
+const modeIndicatorEl = document.getElementById("modeIndicator");
 const listEl = document.getElementById("list");
 const emptyEl = document.getElementById("empty");
 const inputEl = document.getElementById("input");
@@ -21,8 +22,59 @@ const PENCIL_SVG =
   '<svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4z" /><path d="M14.5 5.5l4 4" /></svg>';
 const TRASH_SVG =
   '<svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M6.5 7l1 13h9l1-13" /></svg>';
+const BACK_SVG =
+  '<svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" stroke="currentColor" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+
+// --- emoji data (categorized, for the full picker) ---
+const EMOJI_CATEGORIES = [
+  {
+    name: "Smileys",
+    emojis: "😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗😚😙🥲😋😛😜🤪😝🤑🤗🤭🫢🫣🤫🤔🫡🤐🤨😐😑😶🫥😏😒🙄😬😮‍💨🤥😌😔😪🤤😴😷🤒🤕🤢🤮🤧🥵🥶🥴😵🤯🤠🥳🥸😎🤓🧐😕😟🙁😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🥱😤😡😠🤬😈👿💀☠️💩🤡👹👺👻👽👾🤖😺😸😹😻😼😽🙀😿😾".split(""),
+  },
+  {
+    name: "Gestures",
+    emojis: "👋🤚🖐✋🖖🫱🫲🫳🫴👌🤌🤏✌️🤞🫰🤟🤘🤙👈👉👆🖕👇☝️🫵👍👎✊👊🤛🤜👏🙌🫶👐🤲🤝🙏✍️💅🤳💪🦵🦶👂🦻👃🧠🫀🫁🦷🦴👀👅👄".split(""),
+  },
+  {
+    name: "Objects",
+    emojis: "👓🕶👔👕👖🧣🧤🧥🧦👗👘🥻🩱🩲🩳👙👚🪭👛👜👝🎒🩴👞👟🥾🥿👠👡🩰👢👑👒🎩🎓🧢🪖⛑💄💍💼🩸🔬🔭📡🪀🪁🔮🕹🧸🪅🪩🪆🖼🧿🪬🪧📿💎📯🎯🎮🃏🎴🀄🎲🧩♟🎭🎨🧵🪡🧶🪢".split(""),
+  },
+  {
+    name: "Nature",
+    emojis: "🐶🐱🐭🐹🐰🦊🐻🐼🐻‍❄️🐨🐯🦁🐮🐷🐸🐵🙈🙉🙊🐒🐔🐧🐦🐤🐣🐥🦆🦅🦉🦇🐺🐗🐴🦄🐝🪱🐛🦋🐌🐞🐜🪰🪲🪳🦟🦗🕷🕸🦂🐢🐍🦎🦖🦕🐙🦑🦐🦞🦀🐡🐠🐟🐬🐳🐋🦈🪸🐊".split(""),
+  },
+  {
+    name: "Food",
+    emojis: "🍏🍎🍐🍊🍋🍌🍉🍇🍓🫐🍈🍒🍑🥭🍍🥥🥝🍅🍆🥑🥦🥬🥒🌶🫑🌽🥕🫒🧄🧅🥔🍠🫘🥐🍞🥖🥨🧀🥚🍳🧈🥞🧇🥓🥩🍗🍖🦴🌭🍔🍟🍕🫓🥪🥙🧆🌮🌯🫔🥗🥘🫕🥫🍝🍜🍲🍛🍣🍱🥟🦪🍤🍙🍚🍘🍥🥠🥮🍢🍡🍧🍨🍦🥧🧁🍰🎂🍮🍭🍬🍫🍿🍩🍪🌰🥜".split(""),
+  },
+  {
+    name: "Activity",
+    emojis: "⚽🏀🏈⚾🥎🎾🏐🏉🥏🎱🪀🏓🏸🏒🏑🥍🏏🪃🥅⛳🪁🏹🎣🤿🥊🥋🎽🛹🛼🛷⛸🥌🎿⛷🏂🪂🏋️‍♀️🏋️‍♂️🤼‍♀️🤼‍♂️🤸‍♀️🤸‍♂️⛹️‍♀️⛹️‍♂️🤺🤾‍♀️🤾‍♂️🏌️‍♀️🏌️‍♂️🏇🧘‍♀️🧘‍♂️🏄‍♀️🏄‍♂️🏊‍♀️🏊‍♂️🤽‍♀️🤽‍♂️🚣‍♀️🚣‍♂️🧗‍♀️🧗‍♂️🚵‍♀️🚵‍♂️🚴‍♀️🚴‍♂️".split(""),
+  },
+  {
+    name: "Travel",
+    emojis: "🚗🚕🚙🚌🚎🏎🚓🚑🚒🚐🛻🚚🚛🚜🏍🛵🛺🚲🛴🛹🚏🛣🛤⛽🛑🚨🚥🚦🛰🚀🛸🚁🛶⛵🚤🛥🛳⛴🚢🛟🪝✈️🛩🛫🛬🪂💺🗺🧭🏔⛰🌋🗻🏕🏖🏜🏝🏞🏟🏛🏗🧱🪨🪵🏘🏚🏠🏡🏢🏣🏤🏥🏦🏨🏩🏪🏫🏬🏭🏯🏰💒🗼🗽⛪🕌🛕🕍⛩🕋⛲🌄🌅🌆🌇🌉".split(""),
+  },
+  {
+    name: "Symbols",
+    emojis: "❤️🧡💛💚💙💜🖤🤍🤎💔❣️💕💞💓💗💖💘💝💟☮✝☪🕉☸✡🔯🕎☯☦🛐⛎♈♉♊♋♌♍♎♏♐♑♒♓🆔⚛🉑☢☣📴📳🈶🈚🈸🈺🈷✴🆚💮🉐㊙㊗🈴🈵🈲🅰🅱🆎🆑🅾🆘🛑⛔📛🚫💢♨🚷🚯🚳🚱🔞📵🚭❗❕❓❔‼⁉💯🔱⚜🔰♻✅🈯💹❇✳❎🌐💠ⓜ🈂🛂🛃🛄🛅🆗🆙🆒🆕🆓🆖🆗🆙🆒🆕🆓🆖".split(""),
+  },
+];
+
+// --- option-menu commands ------------------------------------------------
+// Each entry defines a command shown in the Option (⌥) menu.
+//   key:    single letter pressed while ⌥ is held
+//   label:  display name in the hint bar
+//   action: function to execute
+//   modes:  which modes ("todo", "ideas") this command appears in
+const COMMANDS = [
+  { key: "T", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
+  { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
+  { key: "T", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
+];
 
 // View state.
+let mode = "todo"; // "todo" | "ideas"
 let current = null; // YYYY-MM-DD of the viewed day
 let viewIsPast = false; // whether the viewed day is before today
 let lastData = null; // most recent DayData (for re-render on edit)
@@ -31,6 +83,12 @@ let cancelEdit = false; // set when an edit is aborted via Escape
 let dragState = null; // active pointer-drag state, or null
 let selectedIndex = null; // keyboard-highlighted row, or null
 let pendingDeleteIndex = null; // row showing inline delete confirmation, or null
+
+// Idea state.
+let ideas = []; // list of IdeaListEntry
+let ideaDetailSlug = null; // slug of idea being viewed in detail, or null
+let ideaDetailDirty = false; // whether detail has unsaved changes
+let emojiPickerTarget = null; // { slug, callback } for the active picker
 
 // --- date helpers (local, no timezone drift) ---
 function addDays(iso, n) {
@@ -41,12 +99,20 @@ function addDays(iso, n) {
   return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
 }
 
+function render(data, fx = null) {
+  if (mode === "ideas") {
+    renderIdeas(data);
+  } else {
+    renderTodo(data, fx);
+  }
+}
+
 // `fx` is an optional one-shot animation hint describing the single thing that
 // just changed, applied to the freshly-built DOM below:
 //   { kind: "add" }                          -> new (last) row springs in
 //   { kind: "toggle", index, nowChecked }    -> that row's check pulses / settles
 //   { kind: "day", dir: -1 | 1 }             -> the list slides in from dir
-function render(data, fx = null) {
+function renderTodo(data, fx = null) {
   lastData = data;
   current = data.date;
   viewIsPast = data.is_past;
@@ -220,6 +286,402 @@ function render(data, fx = null) {
   updateHints();
 }
 
+// --- idea list view -------------------------------------------------------
+
+function renderIdeas(data) {
+  console.log("[ui] renderIdeas: data.length=", data.length, "ideaDetailSlug=", ideaDetailSlug);
+  ideas = data;
+  ideaDetailSlug = null;
+  editingIndex = null;
+
+  // Show ideas header
+  weekdayEl.textContent = "";
+  dateEl.textContent = "Ideas";
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  composerEl.style.display = "flex";
+
+  const n = ideas.length;
+  listEl.innerHTML = "";
+
+  if (n === 0) {
+    console.log("[ui] renderIdeas: empty list");
+    selectedIndex = null;
+    emptyEl.hidden = false;
+    emptyEl.textContent = "No ideas yet — add your first idea below.";
+    updateHints();
+    return;
+  }
+  emptyEl.hidden = true;
+
+  if (selectedIndex === null) {
+    selectedIndex = 0;
+  } else if (selectedIndex >= n) {
+    selectedIndex = n - 1;
+  }
+  console.log("[ui] renderIdeas: selectedIndex=", selectedIndex, "total=", n);
+
+  ideas.forEach((idea, index) => {
+    console.log("[ui] renderIdeas: row", index, "slug=", idea.slug, "title=", idea.title, "emoji=", idea.emoji, "created=", idea.created);
+    const li = document.createElement("li");
+    li.className = "todo-item idea-row";
+    li.dataset.index = index;
+    if (index === selectedIndex) li.classList.add("selected");
+
+    const emojiBtn = document.createElement("button");
+    emojiBtn.className = "idea-emoji";
+    emojiBtn.textContent = idea.emoji;
+    emojiBtn.title = "Change emoji";
+    emojiBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showEmojiPicker(idea.slug, idea.emoji, async (newEmoji) => {
+        await editIdea(idea.slug, newEmoji, null, null);
+        // Re-render the list to reflect the emoji change
+        renderIdeas(ideas);
+      });
+    });
+    li.appendChild(emojiBtn);
+
+    const label = document.createElement("span");
+    label.className = "label";
+    const textSpan = document.createElement("span");
+    textSpan.className = "label-text";
+    textSpan.textContent = idea.title;
+    label.appendChild(textSpan);
+    li.appendChild(label);
+
+    const dateSpan = document.createElement("span");
+    dateSpan.className = "idea-date";
+    dateSpan.textContent = idea.created;
+    li.appendChild(dateSpan);
+
+    if (pendingDeleteIndex === index) {
+      li.classList.add("pending-delete");
+      const rc = document.createElement("div");
+      rc.className = "row-confirm";
+
+      const text = document.createElement("span");
+      text.className = "row-confirm-text";
+      text.textContent = "Delete?";
+
+      const cancel = document.createElement("button");
+      cancel.className = "rc-btn rc-cancel";
+      cancel.textContent = "No";
+      cancel.addEventListener("click", cancelPendingDelete);
+
+      const confirm = document.createElement("button");
+      confirm.className = "rc-btn rc-delete";
+      confirm.textContent = "Yes";
+      confirm.addEventListener("click", () => deleteIdea(index));
+
+      rc.append(text, cancel, confirm);
+      li.appendChild(rc);
+    } else {
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      const del = document.createElement("button");
+      del.className = "icon-btn danger";
+      del.title = "Delete idea";
+      del.innerHTML = TRASH_SVG;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        requestDeleteIdea(index);
+      });
+
+      actions.appendChild(del);
+      li.appendChild(actions);
+    }
+
+    listEl.appendChild(li);
+  });
+
+  updateHints();
+}
+
+// --- idea detail view -----------------------------------------------------
+
+function renderIdeaDetail(slug) {
+  console.log("[ui] renderIdeaDetail: slug=", slug);
+  ideaDetailSlug = slug;
+  ideaDetailDirty = false;
+  pendingDeleteIndex = null;
+  editingIndex = null;
+
+  invoke("get_idea", { slug }).then((idea) => {
+    console.log("[ui] renderIdeaDetail: got idea=", idea);
+    if (!idea) {
+      console.log("[ui] renderIdeaDetail: idea is null/undefined, switching to ideas list");
+      switchMode("ideas");
+      return;
+    }
+    console.log("[ui] renderIdeaDetail: title=", idea.title, "emoji=", idea.emoji, "description_len=", idea.description.length);
+
+    weekdayEl.textContent = "";
+    dateEl.textContent = "Idea";
+    modeIndicatorEl.hidden = true;
+    todayBtn.hidden = true;
+    composerEl.style.display = "none";
+    listEl.innerHTML = "";
+    emptyEl.hidden = true;
+
+    const detail = document.createElement("div");
+    detail.className = "idea-detail";
+
+    // Emoji + title row
+    const topRow = document.createElement("div");
+    topRow.className = "detail-top";
+
+    const emojiBtn = document.createElement("button");
+    emojiBtn.className = "idea-emoji detail-emoji";
+    emojiBtn.textContent = idea.emoji;
+    emojiBtn.title = "Change emoji";
+    emojiBtn.addEventListener("click", () => {
+      showEmojiPicker(idea.slug, idea.emoji, async (newEmoji) => {
+        await editIdea(idea.slug, newEmoji, null, null);
+        renderIdeaDetail(idea.slug);
+      });
+    });
+    topRow.appendChild(emojiBtn);
+
+    const titleInput = document.createElement("input");
+    titleInput.className = "detail-title-input";
+    titleInput.type = "text";
+    titleInput.value = idea.title;
+    titleInput.addEventListener("input", () => {
+      ideaDetailDirty = true;
+    });
+    titleInput.addEventListener("blur", () => {
+      const t = titleInput.value.trim();
+      if (t && t !== idea.title) {
+        editIdea(idea.slug, null, t, null).then((res) => {
+          renderIdeaDetail(res.newSlug || idea.slug);
+        });
+      }
+    });
+    titleInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        titleInput.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        saveAndGoBack(idea.slug, titleInput, textarea, idea);
+      }
+    });
+    topRow.appendChild(titleInput);
+
+    detail.appendChild(topRow);
+
+    // Created date
+    const createdLine = document.createElement("div");
+    createdLine.className = "detail-created";
+    createdLine.textContent = `Created: ${idea.created}`;
+    detail.appendChild(createdLine);
+
+    // Description textarea
+    const descLabel = document.createElement("div");
+    descLabel.className = "detail-desc-label";
+    descLabel.textContent = "Description (Markdown)";
+    detail.appendChild(descLabel);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "detail-textarea";
+    textarea.value = idea.description;
+    textarea.spellcheck = false;
+    textarea.addEventListener("input", () => {
+      ideaDetailDirty = true;
+    });
+    textarea.addEventListener("blur", () => {
+      if (textarea.value !== idea.description) {
+        editIdea(idea.slug, null, null, textarea.value);
+      }
+    });
+    textarea.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        saveAndGoBack(idea.slug, titleInput, textarea, idea);
+      }
+    });
+    detail.appendChild(textarea);
+
+    listEl.appendChild(detail);
+    updateHints();
+  });
+}
+
+// --- emoji picker ---------------------------------------------------------
+
+function showEmojiPicker(slug, currentEmoji, callback) {
+  console.log("[ui] showEmojiPicker: slug=", slug, "currentEmoji=", currentEmoji);
+  hideEmojiPicker();
+
+  emojiPickerTarget = { slug, callback };
+
+  const overlay = document.createElement("div");
+  overlay.className = "emoji-picker-overlay";
+  overlay.addEventListener("click", hideEmojiPicker);
+
+  const picker = document.createElement("div");
+  picker.className = "emoji-picker";
+  picker.addEventListener("click", (e) => e.stopPropagation());
+
+  // Category tabs
+  const tabBar = document.createElement("div");
+  tabBar.className = "emoji-tabs";
+  let activeCategory = 0;
+
+  const pageContainer = document.createElement("div");
+  pageContainer.className = "emoji-page";
+
+  function renderCategory(idx) {
+    pageContainer.innerHTML = "";
+    tabBar.querySelectorAll(".emoji-tab").forEach((t, i) => {
+      t.classList.toggle("active", i === idx);
+    });
+    const cat = EMOJI_CATEGORIES[idx];
+    const grid = document.createElement("div");
+    grid.className = "emoji-grid";
+    cat.emojis.forEach((e) => {
+      const btn = document.createElement("button");
+      btn.className = "emoji-cell" + (e === currentEmoji ? " selected" : "");
+      btn.textContent = e;
+      btn.addEventListener("click", () => {
+        callback(e);
+        hideEmojiPicker();
+        // Refresh the detail view if open
+        if (ideaDetailSlug) renderIdeaDetail(ideaDetailSlug);
+      });
+      grid.appendChild(btn);
+    });
+    pageContainer.appendChild(grid);
+  }
+
+  EMOJI_CATEGORIES.forEach((cat, i) => {
+    const tab = document.createElement("button");
+    tab.className = "emoji-tab" + (i === 0 ? " active" : "");
+    tab.textContent = cat.name;
+    tab.addEventListener("click", () => {
+      activeCategory = i;
+      renderCategory(i);
+    });
+    tabBar.appendChild(tab);
+  });
+
+  picker.appendChild(tabBar);
+  picker.appendChild(pageContainer);
+  overlay.appendChild(picker);
+  document.body.appendChild(overlay);
+
+  renderCategory(0);
+}
+
+function hideEmojiPicker() {
+  console.log("[ui] hideEmojiPicker");
+  const overlay = document.querySelector(".emoji-picker-overlay");
+  if (overlay) overlay.remove();
+  emojiPickerTarget = null;
+}
+
+// --- idea actions ---------------------------------------------------------
+
+async function addIdea(text) {
+  console.log("[ui] addIdea: called with text=", text);
+  if (!text) {
+    console.log("[ui] addIdea: empty text, returning");
+    return;
+  }
+  selectedIndex = 0;
+  console.log("[ui] addIdea: invoking add_idea with title=", text);
+  ideas = await invoke("add_idea", { title: text });
+  console.log("[ui] addIdea: got", ideas.length, "ideas back", ideas.map(i => i.title));
+  renderIdeas(ideas);
+  console.log("[ui] addIdea: done (blurring input)");
+}
+
+async function editIdea(slug, emoji, title, description) {
+  console.log("[ui] editIdea: slug=", slug, "emoji=", emoji, "title=", title, "description_len=", description && description.length);
+  const args = { slug };
+  if (emoji !== null) args.emoji = emoji;
+  if (title !== null) args.title = title;
+  if (description !== null) args.description = description;
+  const result = await invoke("edit_idea", args);
+  ideas = result.entries;
+  console.log("[ui] editIdea: done,", ideas.length, "ideas, new_slug=", result.new_slug);
+  return { ideas: result.entries, newSlug: result.new_slug };
+}
+
+async function deleteIdea(index) {
+  console.log("[ui] deleteIdea: index=", index, "ideas.length=", ideas.length);
+  const idea = ideas[index];
+  if (!idea) {
+    console.log("[ui] deleteIdea: no idea at index", index);
+    return;
+  }
+  console.log("[ui] deleteIdea: deleting slug=", idea.slug, "title=", idea.title);
+  ideas = await invoke("delete_idea", { slug: idea.slug });
+  console.log("[ui] deleteIdea: done,", ideas.length, "ideas remaining");
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  renderIdeas(ideas);
+}
+
+function requestDeleteIdea(index) {
+  console.log("[ui] requestDeleteIdea: index=", index);
+  selectedIndex = index;
+  pendingDeleteIndex = index;
+  renderIdeas(ideas);
+}
+
+async function saveAndGoBack(slug, titleInput, textarea, originalIdea) {
+  const newTitle = titleInput.value.trim();
+  const newDesc = textarea.value;
+  const promises = [];
+  if (newTitle && newTitle !== originalIdea.title) {
+    promises.push(editIdea(slug, null, newTitle, null));
+  }
+  if (newDesc !== originalIdea.description) {
+    promises.push(editIdea(slug, null, null, newDesc));
+  }
+  await Promise.all(promises);
+  switchMode("ideas");
+}
+
+// --- mode switching -------------------------------------------------------
+
+async function switchMode(newMode) {
+  console.log("[ui] switchMode: from", mode, "to", newMode);
+  hideEmojiPicker();
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  ideaDetailSlug = null;
+  inputEl.blur();
+
+  mode = newMode;
+
+  if (mode === "ideas") {
+    prevBtn.style.display = "none";
+    nextBtn.style.display = "none";
+    modeIndicatorEl.hidden = true;
+    weekdayEl.textContent = "";
+    inputEl.placeholder = "Add an idea…";
+    console.log("[ui] switchMode: fetching ideas...");
+    ideas = await invoke("get_ideas");
+    console.log("[ui] switchMode: got", ideas.length, "ideas", ideas);
+    renderIdeas(ideas);
+  } else {
+    prevBtn.style.display = "";
+    nextBtn.style.display = "";
+    modeIndicatorEl.hidden = true;
+    inputEl.placeholder = "Add a task…";
+    inputEl.blur();
+    renderTodo(await invoke("get_today"));
+  }
+  console.log("[ui] switchMode: done, mode=", mode);
+}
+
+
 // Kick off the one-shot animation for whatever just changed. Row-level classes
 // land on a freshly-built element so they always replay; the list-level day
 // slide is force-restarted with a reflow so rapid navigation re-animates.
@@ -309,9 +771,13 @@ let optionMenuActive = false;
 
 function showOptionMenu() {
   optionMenuActive = true;
-  const notToday = lastData && !lastData.is_today;
-  const html = notToday
-    ? '<span style="color:var(--accent);font-weight:700">H</span>ome'
+  const cmds = COMMANDS.filter(c => {
+    if (!c.modes.includes(mode)) return false;
+    if (c.hideOnToday && lastData && lastData.is_today) return false;
+    return true;
+  });
+  const html = cmds.length
+    ? cmds.map(c => `<span class="k">${c.key}</span> ${c.label}`).join("  ·  ")
     : 'No command available';
   updateHints(html);
 }
@@ -328,13 +794,47 @@ function hintHTML(pairs) {
 }
 
 function updateHints(force = null) {
-  // If force is set, show that content instead of standard hints.
   if (force !== null) {
     statusEl.innerHTML = `<span class="statusbar-track">${force}</span>`;
     measureHintTicker();
     return;
   }
 
+  // Idea detail view hints
+  if (mode === "ideas" && ideaDetailSlug) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
+  // Idea list view hints
+  if (mode === "ideas") {
+    const n = ideas.length;
+    if (pendingDeleteIndex !== null) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["⌫", "Delete"], ["Esc", "Cancel"]])}</span>`;
+      measureHintTicker();
+      return;
+    }
+    if (document.activeElement === inputEl) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["⏎", "Add"], ["Esc", "Clear"]])}</span>`;
+      measureHintTicker();
+      return;
+    }
+    if (n === 0) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Type", "to add"], ["⌥Menu", "Commands"]])}</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+        ["↑↓", "Move"],
+        ["⏎", "Open"],
+        ["⌫", "Delete"],
+        ["⌥Menu", "Commands"],
+      ])}</span>`;
+    }
+    measureHintTicker();
+    return;
+  }
+
+  // Todo mode hints (original logic)
   let pairs;
   if (pendingDeleteIndex !== null) {
     pairs = [["⌫", "Delete"], ["Esc", "Cancel"]];
@@ -344,20 +844,18 @@ function updateHints(force = null) {
     pairs = [["⏎", "Add"], ["Esc", "Clear"]];
   } else {
     const n = lastData ? lastData.items.length : 0;
-    const notToday = lastData && !lastData.is_today;
     if (n === 0) {
       const base = viewIsPast
         ? [["←→", "Day"], ["⇧←→", "Week"]]
         : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"]];
-      if (notToday) base.push(["⌥Menu", "Home"]);
-      pairs = base;
+      pairs = base.concat([["⌥Menu", "Commands"]]);
     } else if (viewIsPast) {
       pairs = [
         ["↑↓", "Move"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
+        ["⌥Menu", "Commands"],
       ];
-      if (notToday) pairs.push(["⌥Menu", "Home"]);
     } else {
       pairs = [
         ["↑↓", "Move"],
@@ -367,8 +865,8 @@ function updateHints(force = null) {
         ["⌫", "Delete"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
+        ["⌥Menu", "Commands"],
       ];
-      if (notToday) pairs.push(["⌥Menu", "Home"]);
     }
   }
   statusEl.innerHTML = `<span class="statusbar-track">${hintHTML(pairs)}</span>`;
@@ -449,12 +947,16 @@ async function moveRow(dir) {
 
 // --- actions ---
 async function goToday() {
+  if (mode !== "todo") {
+    await switchMode("todo");
+    return;
+  }
   editingIndex = null;
   pendingDeleteIndex = null;
   selectedIndex = null;
   optionMenuActive = false;
   inputEl.blur();
-  render(await invoke("get_today"));
+  renderTodo(await invoke("get_today"));
 }
 
 // `dir` (-1 back / +1 forward) drives the slide direction; 0 = a plain jump.
@@ -502,13 +1004,23 @@ function requestDelete(index) {
 
 function cancelPendingDelete() {
   if (pendingDeleteIndex === null) return;
+  const idx = pendingDeleteIndex;
   pendingDeleteIndex = null;
-  render(lastData);
+  if (mode === "ideas") {
+    renderIdeas(ideas);
+  } else {
+    render(lastData);
+  }
 }
 
 function confirmPendingDelete() {
   if (pendingDeleteIndex === null) return;
-  remove(pendingDeleteIndex);
+  const idx = pendingDeleteIndex;
+  if (mode === "ideas") {
+    deleteIdea(idx);
+  } else {
+    remove(idx);
+  }
 }
 
 function startEdit(index) {
@@ -596,13 +1108,19 @@ function elementAfter(y) {
 async function add() {
   const text = inputEl.value.trim();
   if (!text) return;
-  inputEl.value = "";
-  editingIndex = null;
-  pendingDeleteIndex = null;
-  selectedIndex = null;
-  // New tasks are appended, so the entrance plays on the last row.
-  render(await invoke("add_task", { date: current, text }), { kind: "add" });
-  inputEl.focus();
+  console.log("[ui] add: mode=", mode, "text=", text);
+  if (mode === "ideas") {
+    inputEl.value = "";
+    await addIdea(text);
+  } else {
+    inputEl.value = "";
+    editingIndex = null;
+    pendingDeleteIndex = null;
+    selectedIndex = null;
+    renderTodo(await invoke("add_task", { date: current, text }), { kind: "add" });
+    inputEl.focus();
+  }
+  console.log("[ui] add: done");
 }
 
 // --- events ---
@@ -632,6 +1150,29 @@ nextBtn.addEventListener("click", () => goTo(addDays(current, 1), 1));
 todayBtn.addEventListener("click", goToday);
 
 document.addEventListener("keydown", (e) => {
+  // Option+I: from todo, open ideas. From ideas, no-op (use Option+Menu T).
+  if (e.altKey && e.code === "KeyI" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    console.log("[ui] key: Option+I, mode=", mode, "ideaDetailSlug=", ideaDetailSlug);
+    hideEmojiPicker();
+    if (mode === "ideas" && ideaDetailSlug) {
+      console.log("[ui] key: Option+I in detail view, going to ideas list");
+      switchMode("ideas");
+    } else if (mode !== "ideas") {
+      console.log("[ui] key: Option+I opening ideas");
+      switchMode("ideas");
+    }
+    return;
+  }
+
+  // Escape in idea detail -> back to idea list
+  if (mode === "ideas" && ideaDetailSlug && e.key === "Escape") {
+    e.preventDefault();
+    console.log("[ui] key: Escape in idea detail, going back to ideas list");
+    switchMode("ideas");
+    return;
+  }
+
   // While a row's inline delete confirmation is showing it captures the
   // keyboard: Delete/Backspace confirms, Escape cancels, everything else
   // (including Enter) is swallowed so nothing acts on the row mid-decision.
@@ -647,16 +1188,19 @@ document.addEventListener("keydown", (e) => {
   }
 
   // Option (⌥) held: show the option menu in the hint bar.
-  // While held, pressing a command key (e.g. H) executes it immediately.
+  // While held, pressing a command key (e.g. T for Today) executes it.
   if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     const tag = document.activeElement && document.activeElement.tagName;
     const inField = tag === "INPUT" || tag === "TEXTAREA";
     if (!inField && editingIndex === null) {
       e.preventDefault();
       showOptionMenu();
-      // Check for command keys pressed while Option is held.
-      if (e.code === "KeyH") {
-        goToday();
+      const cmd = COMMANDS.find(
+        (c) => e.code === "Key" + c.key && c.modes.includes(mode)
+      );
+      if (cmd) {
+        console.log("[ui] key: Option+" + cmd.key + " (" + cmd.label + ") in mode " + mode);
+        cmd.action();
       }
     }
     return;
@@ -665,6 +1209,79 @@ document.addEventListener("keydown", (e) => {
   const tag = document.activeElement && document.activeElement.tagName;
   const inField = tag === "INPUT" || tag === "TEXTAREA";
 
+  // --- Idea detail view keyboard ---
+  if (mode === "ideas" && ideaDetailSlug) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      // Grab current values from the DOM before saving
+      const ti = document.querySelector(".detail-title-input");
+      const ta = document.querySelector(".detail-textarea");
+      const slug = ideaDetailSlug;
+      const title = ti ? ti.value.trim() : "";
+      const desc = ta ? ta.value : "";
+      // In the detail view, grab the current idea slug and save everything
+      // in one call so slug changes are handled atomically.
+      const detail = document.querySelector(".idea-detail");
+      const emojiBtn = detail && detail.querySelector(".detail-emoji");
+      const emoji = emojiBtn ? emojiBtn.textContent.trim() : null;
+      const args = { slug };
+      if (title) args.title = title;
+      if (desc) args.description = desc;
+      invoke("edit_idea", args).then(() => switchMode("ideas"));
+    }
+    return;
+  }
+
+  // --- Idea list view keyboard ---
+  if (mode === "ideas") {
+    const n = ideas.length;
+    if (inField && tag === "INPUT") {
+      // In the add input — handled by its own events
+      return;
+    }
+    if (n > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
+        applySelection();
+        updateHints();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selectedIndex =
+          selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
+        applySelection();
+        updateHints();
+        return;
+      }
+      if (e.key === "Enter" && selectedIndex !== null) {
+        e.preventDefault();
+        const idea = ideas[selectedIndex];
+        console.log("[ui] key: Enter on idea index=", selectedIndex, "slug=", idea && idea.slug);
+        if (idea) renderIdeaDetail(idea.slug);
+        return;
+      }
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        selectedIndex !== null
+      ) {
+        e.preventDefault();
+        console.log("[ui] key: Delete on idea index=", selectedIndex);
+        requestDeleteIdea(selectedIndex);
+        return;
+      }
+    }
+    // Start typing to add an idea
+    if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
+    if (inField) return;
+    e.preventDefault();
+    inputEl.value += e.key;
+    inputEl.focus();
+    return;
+  }
+
+  // --- Todo mode keyboard (original logic) ---
   // Keyboard list navigation (only when not typing in a field or mid-edit).
   // The cursor is always on a row when the list is non-empty; movement and
   // reordering wrap around at the ends.
