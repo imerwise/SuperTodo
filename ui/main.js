@@ -143,7 +143,10 @@ function render(data, fx = null) {
     } else {
       const label = document.createElement("span");
       label.className = "label";
-      label.textContent = item.text;
+      const textSpan = document.createElement("span");
+      textSpan.className = "label-text";
+      textSpan.textContent = item.text;
+      label.appendChild(textSpan);
       li.appendChild(label);
 
       if (item.rolled) {

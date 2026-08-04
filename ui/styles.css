@@ -288,13 +288,17 @@ body {
   word-break: break-word;
 }
 
+.label-text {
+  position: relative;
+}
+
 .todo-item.done .label {
   color: var(--muted);
 }
 
 /* Strikethrough drawn as an element so it can be wiped in on completion
    (text-decoration can't animate). Static full-width for already-done rows. */
-.todo-item.done .label::after {
+.todo-item.done .label-text::after {
   content: "";
   position: absolute;
   left: 0;
@@ -651,7 +655,7 @@ body.composing .content {
   animation: ringRipple 0.5s ease-out;
 }
 
-.todo-item.fx-check .label::after {
+.todo-item.fx-check .label-text::after {
   animation: strikeWipe 0.28s ease 0.04s both;
 }
 
@@ -764,7 +768,7 @@ body.composing .content {
   .todo-item.fx-check .check,
   .todo-item.fx-check .check svg,
   .todo-item.fx-check .check::after,
-  .todo-item.fx-check .label::after,
+  .todo-item.fx-check .label-text::after,
   .todo-item.fx-uncheck .check,
   .todo-list.fx-day-next,
   .todo-list.fx-day-prev {
