@@ -418,7 +418,7 @@ function renderIdeaDetail(slug) {
     console.log("[ui] renderIdeaDetail: title=", idea.title, "emoji=", idea.emoji, "description_len=", idea.description.length);
 
     weekdayEl.textContent = "";
-    dateEl.textContent = "Idea";
+    dateEl.textContent = "Ideas";
     modeIndicatorEl.hidden = true;
     todayBtn.hidden = true;
     composerEl.style.display = "none";
