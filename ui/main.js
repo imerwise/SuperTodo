@@ -327,6 +327,12 @@ function renderIdeas(data) {
     li.className = "todo-item idea-row";
     li.dataset.index = index;
     if (index === selectedIndex) li.classList.add("selected");
+    li.addEventListener("click", (e) => {
+      if (pendingDeleteIndex !== null) return;
+      if (e.target.closest("button")) return;
+      console.log("[ui] click: idea index=", index, "slug=", idea.slug);
+      renderIdeaDetail(idea.slug);
+    });
 
     const emojiBtn = document.createElement("button");
     emojiBtn.className = "idea-emoji";
@@ -348,12 +354,11 @@ function renderIdeas(data) {
     textSpan.className = "label-text";
     textSpan.textContent = idea.title;
     label.appendChild(textSpan);
-    li.appendChild(label);
-
     const dateSpan = document.createElement("span");
-    dateSpan.className = "idea-date";
-    dateSpan.textContent = idea.created;
-    li.appendChild(dateSpan);
+    dateSpan.className = "idea-date-sub";
+    dateSpan.textContent = `Created on ${idea.created}`;
+    label.appendChild(dateSpan);
+    li.appendChild(label);
 
     if (pendingDeleteIndex === index) {
       li.classList.add("pending-delete");
