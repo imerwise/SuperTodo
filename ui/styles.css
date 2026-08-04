@@ -150,6 +150,10 @@ body {
 /* List -------------------------------------------------------------- */
 .content {
   flex: 1 1 auto;
+  /* overflow-x hidden clips the ±16px horizontal overshoot of the day-slide
+     animation; without it the browser flashes a transient horizontal
+     scrollbar (a thin gray bar) just above the composer during navigation. */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 0 14px 8px;
 }
