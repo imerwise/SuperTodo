@@ -70,11 +70,58 @@ struct IdeaListEntry {
     tags: Vec<String>,
 }
 
+// --- app config ------------------------------------------------------------
+// The storage directory is user-configurable (Settings). The choice is persisted
+// in a small config file that lives *outside* the data directory — in the OS app
+// support folder — so it survives even when the data directory itself is changed.
+
+const APP_IDENTIFIER: &str = "com.imerwise.supertodo";
+
+#[derive(Serialize, Deserialize, Default)]
+struct AppConfig {
+    // Absolute path chosen by the user. Empty/None means "use the default".
+    #[serde(default)]
+    storage_dir: Option<String>,
+}
+
+fn config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join(APP_IDENTIFIER)
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+fn read_config() -> AppConfig {
+    fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_config(cfg: &AppConfig) {
+    let dir = config_dir();
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string_pretty(cfg) {
+        let _ = fs::write(config_path(), json);
+    }
+}
+
 // --- paths -----------------------------------------------------------------
 
+fn default_storage_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("Documents").join("SuperTodo")
+}
+
 fn storage_dir() -> PathBuf {
-    // SUPERTODO_DIR overrides the location — used for isolated testing so real
-    // data is never touched.
+    // SUPERTODO_DIR overrides everything — used for isolated testing so real
+    // data is never touched. When set, it also wins over the user's Settings
+    // choice; get_storage_info reports this so the UI can disable the controls.
     if let Ok(custom) = std::env::var("SUPERTODO_DIR") {
         if !custom.is_empty() {
             let dir = PathBuf::from(custom);
@@ -82,8 +129,15 @@ fn storage_dir() -> PathBuf {
             return dir;
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let dir = PathBuf::from(home).join("Documents").join("SuperTodo");
+    // A folder chosen in Settings takes precedence over the built-in default.
+    if let Some(custom) = read_config().storage_dir {
+        if !custom.trim().is_empty() {
+            let dir = PathBuf::from(custom.trim());
+            let _ = fs::create_dir_all(&dir);
+            return dir;
+        }
+    }
+    let dir = default_storage_dir();
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -999,10 +1053,125 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
     TaggedResult { tag: needles.join(", "), todos, ideas }
 }
 
+// --- storage-location settings ---------------------------------------------
+
+#[derive(Serialize)]
+struct StorageInfo {
+    // The directory currently in use (absolute).
+    path: String,
+    // The folder the user picked in Settings, or "" when on the default.
+    custom: String,
+    // The built-in default location, shown as a hint / reset target.
+    default_path: String,
+    // True when SUPERTODO_DIR is forcing the location; Settings can't change it.
+    env_override: bool,
+}
+
+fn build_storage_info() -> StorageInfo {
+    let env_override = std::env::var("SUPERTODO_DIR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let custom = read_config().storage_dir.unwrap_or_default().trim().to_string();
+    StorageInfo {
+        path: storage_dir().to_string_lossy().to_string(),
+        custom,
+        default_path: default_storage_dir().to_string_lossy().to_string(),
+        env_override,
+    }
+}
+
+#[tauri::command]
+fn get_storage_info() -> StorageInfo {
+    build_storage_info()
+}
+
+/// Points storage at `path`, creating it if needed. Existing files are left where
+/// they are — only the location for reading and creating files changes. Returns
+/// an error string (rejecting the JS promise) if the folder can't be used.
+#[tauri::command]
+fn set_storage_dir(path: String) -> Result<StorageInfo, String> {
+    if std::env::var("SUPERTODO_DIR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("SUPERTODO_DIR is set; the storage folder can't be changed here.".into());
+    }
+    let trimmed = path.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Please choose a folder.".into());
+    }
+    let dir = PathBuf::from(&trimmed);
+    fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create that folder: {e}"))?;
+    // Probe writability so a bad choice fails here, not silently later.
+    let probe = dir.join(".supertodo_write_test");
+    fs::write(&probe, b"ok").map_err(|e| format!("That folder isn't writable: {e}"))?;
+    let _ = fs::remove_file(&probe);
+
+    let mut cfg = read_config();
+    cfg.storage_dir = Some(trimmed);
+    write_config(&cfg);
+    Ok(build_storage_info())
+}
+
+/// Clears the custom folder, reverting to the default location.
+#[tauri::command]
+fn reset_storage_dir() -> StorageInfo {
+    let mut cfg = read_config();
+    cfg.storage_dir = None;
+    write_config(&cfg);
+    build_storage_info()
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    // Drives the storage-location commands end to end against an isolated HOME so
+    // real data/config is never touched. Verifies: default when unset, that
+    // set_storage_dir persists a config file and redirects storage_dir(), and
+    // that reset reverts to the default.
+    #[test]
+    fn set_and_reset_storage_dir() {
+        let tmp = std::env::temp_dir().join(format!("supertodo_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+
+        // Default location when nothing is configured.
+        let info = reset_storage_dir();
+        let default = tmp.join("Documents").join("SuperTodo");
+        assert_eq!(info.path, default.to_string_lossy());
+        assert_eq!(info.custom, "");
+        assert!(!info.env_override);
+        assert_eq!(storage_dir(), default);
+
+        // Point storage at a custom folder.
+        let custom = tmp.join("my custom todos");
+        let info = set_storage_dir(custom.to_string_lossy().to_string()).unwrap();
+        assert_eq!(info.custom, custom.to_string_lossy());
+        assert_eq!(storage_dir(), custom);
+        // The choice is persisted in the app-support config, not the data dir.
+        assert!(config_path().exists());
+        assert!(!custom.join("config.json").exists());
+
+        // Empty input is rejected.
+        assert!(set_storage_dir("   ".into()).is_err());
+
+        // Reset reverts to the default.
+        let info = reset_storage_dir();
+        assert_eq!(info.custom, "");
+        assert_eq!(storage_dir(), default);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_today,
             get_day,
@@ -1019,7 +1188,10 @@ pub fn run() {
             get_tags,
             get_tagged,
             get_tagged_multi,
-            get_tag_colors
+            get_tag_colors,
+            get_storage_info,
+            set_storage_dir,
+            reset_storage_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running SuperTodo");

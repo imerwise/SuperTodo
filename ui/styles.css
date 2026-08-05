@@ -1405,3 +1405,80 @@ body.composing .content {
   background: var(--accent);
   color: #fff;
 }
+
+/* Keyboard cursor over Settings rows (↑↓ to move, Enter to activate). */
+.settings-row.selected {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  border-bottom-color: transparent;
+}
+
+.settings-row.selected .settings-title {
+  color: var(--accent);
+}
+
+.settings-row.disabled {
+  opacity: 0.55;
+}
+
+/* Storage-folder row: title/description/path stack on the left, actions wrap
+   underneath on narrow widths. */
+.settings-row-stacked {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.settings-path {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.settings-note {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.settings-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings-btn {
+  border: 1px solid var(--line);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-btn:hover {
+  filter: brightness(1.05);
+}
+
+.settings-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
+.settings-btn-ghost {
+  background: transparent;
+  color: var(--muted);
+}
+
+.settings-btn-ghost:hover {
+  color: var(--text);
+  filter: none;
+}

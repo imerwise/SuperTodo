@@ -29,7 +29,7 @@ Tasks are plain-text files at `~/Documents/SuperTodo/todo_YYYYMMDD.txt`, one tas
 - **Never rewrite past-day files.** All mutating commands already guard `d >= today()` (see `toggle_task`/`delete_task`, `lib.rs:331-370`). Removing a guard re-triggers carry-over on the next open and duplicates tasks. Past days are intentionally read-only in the UI too.
 - **The `[>]` marker must round-trip through `format_item`/`parse_item`.** Writing a rolled task back as `[ ]` makes it re-carry and duplicate.
 
-`SUPERTODO_DIR` env var overrides the storage directory (`lib.rs:49`) — set it during any manual testing so real user data at `~/Documents/SuperTodo` is never touched.
+The storage directory is resolved in `storage_dir()` with this precedence: `SUPERTODO_DIR` env var → user's Settings choice (persisted in `~/Library/Application Support/com.imerwise.supertodo/config.json`) → default `~/Documents/SuperTodo`. Set `SUPERTODO_DIR` during any manual testing so real user data is never touched — it wins over the Settings choice.
 
 ## Frontend notes
 

@@ -121,6 +121,18 @@ function saveSettings() {
   }
 }
 
+// Where files are stored. Unlike the localStorage settings above, this lives in
+// the Rust backend (it decides where files are read/written), so it's fetched on
+// demand and cached here for the Settings view.
+// { path, custom, default_path, env_override } | null
+let storageInfo = null;
+
+// Settings keyboard navigation: a cursor over the actionable rows. Each entry is
+// { el, onEnter, disabled }; ↑↓ move the cursor and Enter runs the row's action
+// (toggle a toggle, or trigger a button — e.g. open the folder dialog).
+let settingsIndex = 0;
+let settingsRows = [];
+
 // Idea state.
 let ideas = []; // list of IdeaListEntry
 let ideaDetailSlug = null; // slug of idea being viewed in detail, or null
@@ -1260,7 +1272,8 @@ function updateHints(force = null) {
   // Settings view hints
   if (settingsView) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
-      ["Space", "Toggle"],
+      ["↑↓", "Move"],
+      ["⏎", "Select"],
       ["Esc", "Back"],
     ])}</span>`;
     measureHintTicker();
@@ -1716,8 +1729,61 @@ function openSettings() {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  settingsIndex = 0;
   inputEl.blur();
   renderSettings();
+  // Storage info comes from the backend; refresh and re-render when it lands.
+  refreshStorageInfo();
+}
+
+async function refreshStorageInfo() {
+  try {
+    storageInfo = await invoke("get_storage_info");
+  } catch (e) {
+    console.log("[ui] get_storage_info failed", e);
+    storageInfo = null;
+  }
+  if (settingsView) renderSettings();
+}
+
+// Native folder picker → persist the choice. Existing files stay where they are;
+// only where files are read/created changes.
+async function chooseStorageFolder() {
+  if (storageInfo && storageInfo.env_override) return;
+  let picked;
+  try {
+    picked = await invoke("plugin:dialog|open", {
+      options: {
+        directory: true,
+        multiple: false,
+        title: "Choose the SuperTodo storage folder",
+        defaultPath: (storageInfo && storageInfo.path) || undefined,
+      },
+    });
+  } catch (e) {
+    console.log("[ui] folder picker failed", e);
+    return;
+  }
+  if (!picked || typeof picked !== "string") return; // cancelled
+  try {
+    storageInfo = await invoke("set_storage_dir", { path: picked });
+  } catch (e) {
+    // The backend rejects with a human-readable message (e.g. not writable).
+    window.alert(typeof e === "string" ? e : "Couldn't use that folder.");
+    return;
+  }
+  if (settingsView) renderSettings();
+}
+
+async function resetStorageFolder() {
+  if (storageInfo && storageInfo.env_override) return;
+  try {
+    storageInfo = await invoke("reset_storage_dir");
+  } catch (e) {
+    console.log("[ui] reset_storage_dir failed", e);
+    return;
+  }
+  if (settingsView) renderSettings();
 }
 
 function exitSettings() {
@@ -1752,7 +1818,87 @@ function renderSettings() {
   composerEl.style.display = "none";
   listEl.innerHTML = "";
   emptyEl.hidden = true;
+  settingsRows = [];
 
+  buildTagOrderRow();
+  buildStorageRows();
+
+  if (settingsRows.length) {
+    settingsIndex = clampToEnabledRow(settingsIndex);
+    highlightSettingsRow();
+  }
+  updateHints();
+}
+
+// Registers one selectable Settings row: appends it, remembers its action for the
+// keyboard (↑↓/Enter), and mirrors that on mouse (hover moves the cursor, click
+// runs the action). Inner segmented buttons keep their own click handling.
+function addSettingsRow(el, { onEnter, disabled = false } = {}) {
+  const idx = settingsRows.length;
+  if (disabled) el.classList.add("disabled");
+  el.addEventListener("mousemove", () => {
+    if (!disabled && settingsIndex !== idx) {
+      settingsIndex = idx;
+      highlightSettingsRow();
+    }
+  });
+  el.addEventListener("click", (e) => {
+    if (disabled) return;
+    settingsIndex = idx;
+    highlightSettingsRow();
+    if (e.target.closest(".settings-seg")) return; // seg button handles itself
+    if (onEnter) onEnter();
+  });
+  listEl.appendChild(el);
+  settingsRows.push({ el, onEnter, disabled });
+}
+
+function highlightSettingsRow() {
+  settingsRows.forEach((r, i) => {
+    const on = i === settingsIndex;
+    r.el.classList.toggle("selected", on);
+    if (on) r.el.scrollIntoView({ block: "nearest" });
+  });
+}
+
+// Snap an index onto the nearest enabled row (disabled rows, e.g. under a
+// SUPERTODO_DIR override, are skipped by the cursor).
+function clampToEnabledRow(idx) {
+  const n = settingsRows.length;
+  if (!n) return 0;
+  idx = Math.max(0, Math.min(idx, n - 1));
+  if (!settingsRows[idx].disabled) return idx;
+  for (let d = 1; d < n; d++) {
+    if (idx + d < n && !settingsRows[idx + d].disabled) return idx + d;
+    if (idx - d >= 0 && !settingsRows[idx - d].disabled) return idx - d;
+  }
+  return idx;
+}
+
+// Move the cursor to the next enabled row in `delta` direction, wrapping around.
+function moveSettings(delta) {
+  const n = settingsRows.length;
+  if (!n) return;
+  let i = settingsIndex;
+  for (let step = 0; step < n; step++) {
+    i = (i + delta + n) % n;
+    if (!settingsRows[i].disabled) {
+      settingsIndex = i;
+      break;
+    }
+  }
+  highlightSettingsRow();
+}
+
+// Enter on the current row: toggle a toggle, or trigger a button (the folder
+// dialog / reset).
+function activateSettings() {
+  const r = settingsRows[settingsIndex];
+  if (r && !r.disabled && r.onEnter) r.onEnter();
+}
+
+// A toggle row: Enter flips it; the segmented control also takes direct clicks.
+function buildTagOrderRow() {
   const row = document.createElement("li");
   row.className = "settings-row";
 
@@ -1767,11 +1913,12 @@ function renderSettings() {
   info.append(title, desc);
   row.appendChild(info);
 
-  // Segmented control: Alphabetical | Input order. Space also toggles.
   const seg = document.createElement("div");
   seg.className = "settings-seg";
   const mk = (label, alpha) => {
     const b = document.createElement("button");
+    b.type = "button";
+    b.tabIndex = -1;
     b.className = "seg-btn" + (settings.sortTagsAlpha === alpha ? " active" : "");
     b.textContent = label;
     b.addEventListener("click", () => setTagSort(alpha));
@@ -1780,8 +1927,90 @@ function renderSettings() {
   seg.append(mk("Alphabetical", true), mk("Input order", false));
   row.appendChild(seg);
 
-  listEl.appendChild(row);
-  updateHints();
+  addSettingsRow(row, { onEnter: () => setTagSort(!settings.sortTagsAlpha) });
+}
+
+// The storage-folder setting. The main row's action (Enter, or click) opens the
+// native folder picker; when a custom folder is set, a second row resets to the
+// default. Under a SUPERTODO_DIR override both are disabled.
+function buildStorageRows() {
+  const envOverride = storageInfo && storageInfo.env_override;
+  const isCustom = storageInfo && storageInfo.custom;
+
+  const row = document.createElement("li");
+  row.className = "settings-row settings-row-stacked";
+
+  const info = document.createElement("div");
+  info.className = "settings-info";
+  const title = document.createElement("div");
+  title.className = "settings-title";
+  title.textContent = "Storage folder";
+  const desc = document.createElement("div");
+  desc.className = "settings-desc";
+  desc.textContent = "Where your todo and idea files are saved.";
+  info.append(title, desc);
+
+  const path = document.createElement("div");
+  path.className = "settings-path";
+  path.textContent = storageInfo ? storageInfo.path : "…";
+  info.appendChild(path);
+
+  if (envOverride) {
+    const note = document.createElement("div");
+    note.className = "settings-note";
+    note.textContent =
+      "Set by the SUPERTODO_DIR environment variable — clear it to change this here.";
+    info.appendChild(note);
+  } else if (isCustom) {
+    const note = document.createElement("div");
+    note.className = "settings-note";
+    note.textContent = "Existing files stay in their old folder; they aren't moved.";
+    info.appendChild(note);
+  }
+  row.appendChild(info);
+
+  const actions = document.createElement("div");
+  actions.className = "settings-actions";
+  const choose = document.createElement("button");
+  choose.type = "button";
+  choose.tabIndex = -1;
+  choose.className = "settings-btn";
+  choose.textContent = "Choose folder…";
+  choose.disabled = !storageInfo || envOverride;
+  actions.appendChild(choose);
+  row.appendChild(actions);
+
+  addSettingsRow(row, {
+    onEnter: chooseStorageFolder,
+    disabled: !storageInfo || envOverride,
+  });
+
+  if (isCustom && !envOverride) {
+    const resetRow = document.createElement("li");
+    resetRow.className = "settings-row";
+    const rinfo = document.createElement("div");
+    rinfo.className = "settings-info";
+    const rtitle = document.createElement("div");
+    rtitle.className = "settings-title";
+    rtitle.textContent = "Reset to default folder";
+    const rdesc = document.createElement("div");
+    rdesc.className = "settings-desc";
+    rdesc.textContent = storageInfo.default_path;
+    rinfo.append(rtitle, rdesc);
+    resetRow.appendChild(rinfo);
+
+    const ractions = document.createElement("div");
+    ractions.className = "settings-actions";
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.tabIndex = -1;
+    reset.className = "settings-btn settings-btn-ghost";
+    reset.textContent = "Reset";
+    ractions.appendChild(reset);
+    resetRow.appendChild(ractions);
+
+    addSettingsRow(resetRow, { onEnter: resetStorageFolder });
+  }
 }
 
 function renderTagFilter(result) {
@@ -2116,9 +2345,15 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       exitSettings();
-    } else if (e.key === " " || e.key === "Enter") {
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setTagSort(!settings.sortTagsAlpha);
+      moveSettings(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      moveSettings(-1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activateSettings();
     }
     return;
   }

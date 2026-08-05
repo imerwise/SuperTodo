@@ -71,7 +71,9 @@ npm run icons
 
 The tag list is derived on demand from whatever `#tags` currently exist across todos and ideas — there's no separate tag file, so a tag disappears from suggestions once nothing carries it.
 
-Set `SUPERTODO_DIR` to an alternate path for testing without touching real data.
+The storage folder defaults to `~/Documents/SuperTodo` but can be changed in **Settings → Storage folder** (`⌥S`). The choice is saved in `~/Library/Application Support/com.imerwise.supertodo/config.json`, independent of the data itself. Changing it only affects where files are read and created — existing files are not moved.
+
+Set the `SUPERTODO_DIR` env var to force an alternate path for testing without touching real data; it overrides the Settings choice.
 
 ## Architecture
 
