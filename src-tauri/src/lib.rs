@@ -825,12 +825,85 @@ struct TaggedResult {
     ideas: Vec<IdeaListEntry>,
 }
 
-/// Tags in first-appearance order. The frontend assigns chip colors by this
-/// order (looping over the palette) and sorts its own copy for menus.
+/// The in-use tag vocabulary (deduped), for autocomplete and the Tags view.
+/// Derived on demand, so orphaned tags never appear as suggestions.
 #[tauri::command]
 fn get_tags() -> Vec<String> {
     let dir = storage_dir();
     tags_in_creation_order(&dir)
+}
+
+// --- persistent chip colors (tags.json) ------------------------------------
+// tags.json records each tag's chip color explicitly, plus `next` — the color to
+// hand the next brand-new tag, advanced 1→10→1 so colors follow creation order
+// and loop. A tag keeps its stored color for as long as it is used; when it is no
+// longer referenced anywhere it is pruned from the file. `next` is monotonic
+// (never rewound by a prune), so creation-order looping survives deletions.
+
+#[derive(Serialize, Deserialize, Default)]
+struct TagColors {
+    #[serde(default)]
+    next: u8,
+    #[serde(default)]
+    map: std::collections::HashMap<String, u8>, // lowercased tag -> color 1..10
+}
+
+fn tags_colors_path(dir: &PathBuf) -> PathBuf {
+    dir.join("tags.json")
+}
+
+fn read_tag_colors(dir: &PathBuf) -> TagColors {
+    // A parse failure (including the legacy array format from an earlier build)
+    // yields an empty set, which the reconcile below then repopulates.
+    let mut c: TagColors = fs::read_to_string(tags_colors_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if c.next < 1 || c.next > 10 {
+        c.next = 1;
+    }
+    c
+}
+
+fn write_tag_colors(dir: &PathBuf, c: &TagColors) {
+    if let Ok(json) = serde_json::to_string_pretty(c) {
+        let _ = fs::write(tags_colors_path(dir), json);
+    }
+}
+
+/// The tag -> color map (keys lowercased), reconciled against what's actually in
+/// use: orphaned tags are pruned, and any in-use tag without a color is assigned
+/// the next color in the looping sequence (in creation order). Because the UI
+/// refreshes after every mutation, a freshly created tag is the sole new entry
+/// and takes the next color, leaving existing tags' colors untouched.
+#[tauri::command]
+fn get_tag_colors() -> std::collections::HashMap<String, u8> {
+    use std::collections::HashSet;
+    let dir = storage_dir();
+    let mut c = read_tag_colors(&dir);
+
+    let in_use = tags_in_creation_order(&dir); // display forms, creation order
+    let in_use_lower: HashSet<String> = in_use.iter().map(|t| t.to_lowercase()).collect();
+
+    let mut changed = false;
+    let before = c.map.len();
+    c.map.retain(|k, _| in_use_lower.contains(k));
+    if c.map.len() != before {
+        changed = true;
+    }
+    for t in &in_use {
+        let key = t.to_lowercase();
+        if !c.map.contains_key(&key) {
+            c.map.insert(key, c.next);
+            c.next = (c.next % 10) + 1;
+            changed = true;
+        }
+    }
+
+    if changed {
+        write_tag_colors(&dir, &c);
+    }
+    c.map
 }
 
 /// Returns every todo (across all day files) and every idea whose tags include
@@ -903,7 +976,8 @@ pub fn run() {
             edit_idea,
             delete_idea,
             get_tags,
-            get_tagged
+            get_tagged,
+            get_tag_colors
         ])
         .run(tauri::generate_context!())
         .expect("error while running SuperTodo");

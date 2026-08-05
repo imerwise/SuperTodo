@@ -1237,40 +1237,13 @@ body.composing .content {
   border-radius: 6px;
 }
 
-/* Tag picker modal (reuses .emoji-picker-overlay) */
-.tag-picker {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
-  max-width: 340px;
-  width: 90vw;
-  max-height: 360px;
-  overflow-y: auto;
-  padding: 14px;
+/* Browsable Tags view — one selectable row per tag. */
+.tag-list-row {
+  cursor: pointer;
 }
 
-.tag-picker-title {
+.tag-list-row .tag-chip {
   font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  margin-bottom: 12px;
-}
-
-.tag-picker-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.tag-picker-grid .tag-chip {
-  font-size: 12px;
-  padding: 4px 10px;
-}
-
-.tag-picker-empty {
-  font-size: 13px;
-  color: var(--muted);
+  padding: 3px 10px;
+  cursor: pointer;
 }

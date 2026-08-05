@@ -71,7 +71,7 @@ const COMMANDS = [
   { key: "T", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
   { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
   { key: "T", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
-  { key: "K", label: "Tags", action: showTagPicker, modes: ["todo", "ideas"] },
+  { key: "K", label: "Tags", action: openTagList, modes: ["todo", "ideas"] },
 ];
 
 // View state.
@@ -87,8 +87,10 @@ let pendingDeleteIndex = null; // row showing inline delete confirmation, or nul
 
 // Tag state.
 let tagCache = []; // all known tags (from get_tags), for autocomplete
-let activeTag = null; // when set, the app shows the global tag-filter view
-let tagFilterReturn = null; // { mode, current } to restore when the filter is cleared
+let activeTag = null; // when set, the app shows the results for one tag
+let tagListView = false; // when true, the app shows the browsable Tags view
+let filterCameFromList = false; // whether the active results were opened from the Tags view
+let tagFilterReturn = null; // { mode, current } to restore when the whole tag flow exits
 
 // Idea state.
 let ideas = []; // list of IdeaListEntry
@@ -114,16 +116,17 @@ const TAG_COLORS = 10;
 // lowercased tag -> color slot (1..TAG_COLORS), keyed by creation order.
 let tagColor = {};
 
-// Refresh the cached tag vocabulary (in creation order) used by autocomplete and
-// for the looping chip-color assignment. Cheap; called at startup and after any
-// mutation that may introduce or remove a tag.
+// Refresh the cached tag vocabulary (in-use tags, for autocomplete/menus) and the
+// color map (from the persistent creation-order ledger). Cheap; called at startup
+// and after any mutation that may introduce or remove a tag.
 async function refreshTags() {
   try {
-    tagCache = await invoke("get_tags"); // creation order
-    tagColor = {};
-    tagCache.forEach((t, i) => {
-      tagColor[t.toLowerCase()] = (i % TAG_COLORS) + 1;
-    });
+    const [inUse, colors] = await Promise.all([
+      invoke("get_tags"), // in-use tags (suggestions)
+      invoke("get_tag_colors"), // persistent per-tag colors (from tags.json)
+    ]);
+    tagCache = inUse;
+    tagColor = colors || {}; // { lowercased-tag: color 1..10 }
   } catch (e) {
     console.log("[ui] refreshTags failed", e);
   }
@@ -308,8 +311,8 @@ function attachTagAutocomplete(input) {
 }
 
 function render(data, fx = null) {
-  // The global tag-filter view owns the screen; ignore stray day/idea renders.
-  if (activeTag) return;
+  // The tag views own the screen; ignore stray day/idea renders underneath.
+  if (activeTag || tagListView) return;
   if (mode === "ideas") {
     renderIdeas(data);
   } else {
@@ -753,24 +756,27 @@ function buildIdeaTagBox(idea) {
   input.autocomplete = "off";
   input.spellcheck = false;
 
-  function save() {
+  // Persist, then refresh the color map so a newly added tag's chip gets its
+  // real ledger color immediately (not the fallback) on the redraw that follows.
+  async function save() {
     idea.tags = tags.slice();
-    editIdea(idea.slug, null, null, null, tags.slice());
+    await editIdea(idea.slug, null, null, null, tags.slice());
+    await refreshTags();
   }
 
-  function addTag(raw) {
+  async function addTag(raw) {
     const t = (raw || "").trim().replace(/^#+/, "").trim();
     if (!t || !/^[A-Za-z0-9_-]+$/.test(t)) return;
     if (tags.some((x) => x.toLowerCase() === t.toLowerCase())) return;
     tags.push(t);
-    save();
+    await save();
     redraw();
     input.focus();
   }
 
-  function removeTag(t) {
+  async function removeTag(t) {
     tags = tags.filter((x) => x !== t);
-    save();
+    await save();
     redraw();
     input.focus();
   }
@@ -1215,11 +1221,22 @@ function updateHints(force = null) {
     return;
   }
 
-  // Global tag-filter view hints
+  // Tags view hints
+  if (tagListView) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+      ["↑↓", "Move"],
+      ["⏎", "Filter"],
+      ["Esc", "Back"],
+    ])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
+  // Tag results view hints
   if (activeTag) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
       ["⏎/Click", "Open"],
-      ["Esc", "Clear filter"],
+      ["Esc", filterCameFromList ? "Back to tags" : "Clear filter"],
     ])}</span>`;
     measureHintTicker();
     return;
@@ -1396,14 +1413,34 @@ async function goTo(iso, dir = 0) {
   );
 }
 
-// --- global tag filter view ----------------------------------------------
+// --- tag views ------------------------------------------------------------
+// Two screens, both in-app (no modal): the Tags view (a browsable list of every
+// tag) and the results view (every todo + idea carrying one selected tag).
+// `tagFilterReturn` records where the flow started so exiting returns there.
 
-// Enter the cross-cutting view listing every todo (any day) and idea carrying
-// `tag`. Remembers where we came from so clearing the filter returns there.
+// Open the browsable Tags view — the entry point for filtering by tag.
+async function openTagList() {
+  hideEmojiPicker();
+  if (!tagFilterReturn) tagFilterReturn = { mode, current };
+  await refreshTags();
+  activeTag = null;
+  tagListView = true;
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  ideaDetailSlug = null;
+  inputEl.blur();
+  renderTagList();
+}
+
+// Show every todo (any day) and idea carrying `tag`. Selecting a tag from the
+// Tags view routes here; clicking a chip anywhere does too.
 async function openTagFilter(tag) {
   if (!tag) return;
   hideEmojiPicker();
-  if (!activeTag) tagFilterReturn = { mode, current };
+  if (!tagFilterReturn) tagFilterReturn = { mode, current };
+  filterCameFromList = tagListView;
+  tagListView = false;
   activeTag = tag;
   editingIndex = null;
   pendingDeleteIndex = null;
@@ -1414,9 +1451,27 @@ async function openTagFilter(tag) {
   renderTagFilter(result);
 }
 
+// Back out of the results view: to the Tags view if that's where we came from,
+// otherwise all the way out of the tag flow.
 function clearTagFilter() {
+  if (filterCameFromList) {
+    openTagList();
+  } else {
+    exitTagFlow();
+  }
+}
+
+// Leave the Tags view entirely.
+function exitTagView() {
+  exitTagFlow();
+}
+
+// Restore whatever screen the tag flow was entered from.
+function exitTagFlow() {
   const ret = tagFilterReturn || { mode: "todo", current: null };
   activeTag = null;
+  tagListView = false;
+  filterCameFromList = false;
   tagFilterReturn = null;
   if (ret.mode === "ideas") {
     switchMode("ideas");
@@ -1429,9 +1484,11 @@ function clearTagFilter() {
   }
 }
 
-// Leave the filter and open a specific day / idea from a result row.
+// Leave the tag flow and open a specific day / idea from a result row.
 function jumpToDay(date) {
   activeTag = null;
+  tagListView = false;
+  filterCameFromList = false;
   tagFilterReturn = null;
   mode = "todo";
   prevBtn.style.display = "";
@@ -1441,6 +1498,8 @@ function jumpToDay(date) {
 
 async function openIdeaFromFilter(slug) {
   activeTag = null;
+  tagListView = false;
+  filterCameFromList = false;
   tagFilterReturn = null;
   mode = "ideas";
   prevBtn.style.display = "none";
@@ -1448,6 +1507,50 @@ async function openIdeaFromFilter(slug) {
   inputEl.placeholder = "Add an idea…";
   ideas = await invoke("get_ideas");
   renderIdeaDetail(slug);
+}
+
+// The browsable Tags view: one selectable row per tag (alphabetical). Enter or
+// click opens that tag's results.
+function renderTagList() {
+  weekdayEl.textContent = "";
+  dateEl.textContent = "Tags";
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  composerEl.style.display = "none";
+  listEl.innerHTML = "";
+
+  const tags = sortedTags();
+  if (tags.length === 0) {
+    selectedIndex = null;
+    emptyEl.hidden = false;
+    emptyEl.textContent = "No tags yet — add #hashtags to todos or ideas.";
+    updateHints();
+    return;
+  }
+  emptyEl.hidden = true;
+
+  if (selectedIndex === null) selectedIndex = 0;
+  else if (selectedIndex >= tags.length) selectedIndex = tags.length - 1;
+
+  tags.forEach((t, index) => {
+    const li = document.createElement("li");
+    li.className = "todo-item tag-list-row";
+    li.dataset.index = index;
+    if (index === selectedIndex) li.classList.add("selected");
+    const chip = document.createElement("span");
+    chip.className = "tag-chip tag-c" + colorForTag(t);
+    chip.textContent = t;
+    li.appendChild(chip);
+    li.addEventListener("click", () => {
+      selectedIndex = index;
+      openTagFilter(t);
+    });
+    listEl.appendChild(li);
+  });
+
+  updateHints();
 }
 
 function renderTagFilter(result) {
@@ -1476,7 +1579,7 @@ function renderTagFilter(result) {
   blabel.textContent = `Tagged “${result.tag}”`;
   const clr = document.createElement("button");
   clr.className = "tag-filter-clear";
-  clr.textContent = "Clear ✕";
+  clr.textContent = filterCameFromList ? "‹ Tags" : "Clear ✕";
   clr.addEventListener("click", clearTagFilter);
   banner.append(blabel, clr);
   listEl.appendChild(banner);
@@ -1539,49 +1642,6 @@ function renderTagFilter(result) {
   }
 
   updateHints();
-}
-
-// A modal list of every known tag; picking one opens its filter. Reuses the
-// emoji-picker overlay styling.
-async function showTagPicker() {
-  hideEmojiPicker();
-  await refreshTags();
-  const overlay = document.createElement("div");
-  overlay.className = "emoji-picker-overlay";
-  overlay.addEventListener("click", () => overlay.remove());
-
-  const picker = document.createElement("div");
-  picker.className = "tag-picker";
-  picker.addEventListener("click", (e) => e.stopPropagation());
-
-  const title = document.createElement("div");
-  title.className = "tag-picker-title";
-  title.textContent = "Filter by tag";
-  picker.appendChild(title);
-
-  if (tagCache.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "tag-picker-empty";
-    empty.textContent = "No tags yet — add #hashtags to todos or ideas.";
-    picker.appendChild(empty);
-  } else {
-    const grid = document.createElement("div");
-    grid.className = "tag-picker-grid";
-    sortedTags().forEach((t) => {
-      const b = document.createElement("button");
-      b.className = "tag-chip tag-c" + colorForTag(t);
-      b.textContent = t;
-      b.addEventListener("click", () => {
-        overlay.remove();
-        openTagFilter(t);
-      });
-      grid.appendChild(b);
-    });
-    picker.appendChild(grid);
-  }
-
-  overlay.appendChild(picker);
-  document.body.appendChild(overlay);
 }
 
 async function toggle(index) {
@@ -1655,8 +1715,9 @@ async function commitEdit(index, value) {
     render(await invoke("get_day", { date: current }));
     return;
   }
-  render(await invoke("edit_task", { date: current, index, text }));
-  refreshTags();
+  const data = await invoke("edit_task", { date: current, index, text });
+  await refreshTags();
+  render(data);
 }
 
 // --- drag & drop reordering (pointer-based; reliable inside WKWebView) ---
@@ -1732,8 +1793,11 @@ async function add() {
     editingIndex = null;
     pendingDeleteIndex = null;
     selectedIndex = null;
-    renderTodo(await invoke("add_task", { date: current, text }), { kind: "add" });
-    refreshTags();
+    const data = await invoke("add_task", { date: current, text });
+    // Refresh colors before rendering so a brand-new tag's chip is right the
+    // first time (its ledger slot must exist before colorForTag runs).
+    await refreshTags();
+    renderTodo(data, { kind: "add" });
     inputEl.focus();
   }
   console.log("[ui] add: done");
@@ -1768,8 +1832,32 @@ nextBtn.addEventListener("click", () => goTo(addDays(current, 1), 1));
 todayBtn.addEventListener("click", goToday);
 
 document.addEventListener("keydown", (e) => {
-  // In the global tag-filter view, Escape clears the filter; other keys are
-  // swallowed so day/list navigation can't act underneath it.
+  // The browsable Tags view: arrows move the cursor, Enter opens the selected
+  // tag's results, Escape leaves the tag flow. Everything else is swallowed.
+  if (tagListView) {
+    const items = sortedTags();
+    const n = items.length;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      exitTagView();
+    } else if (n > 0 && e.key === "ArrowDown") {
+      e.preventDefault();
+      selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
+      applySelection();
+    } else if (n > 0 && e.key === "ArrowUp") {
+      e.preventDefault();
+      selectedIndex =
+        selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
+      applySelection();
+    } else if (n > 0 && e.key === "Enter" && selectedIndex !== null) {
+      e.preventDefault();
+      openTagFilter(items[selectedIndex]);
+    }
+    return;
+  }
+
+  // The tag results view: Escape backs out (to the Tags view or the origin);
+  // other keys are swallowed so nothing navigates underneath it.
   if (activeTag) {
     if (e.key === "Escape") {
       e.preventDefault();
