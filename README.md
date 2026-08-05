@@ -29,8 +29,9 @@ Tasks are plain-text files — one per day. Ideas are individual Markdown files 
 | `⇧↑` `⇧↓` | Reorder task |
 | `⌥T` | Go to today (todo) / back to todo (ideas) |
 | `⌥I` | Open ideas |
-| `⌥K` | Filter by tag (pick from all tags) |
-| `Esc` | Back from idea detail / clear tag filter / cancel |
+| `⌥K` | Open the Tags view (browse & filter by tag) |
+| `⌥S` | Open Settings |
+| `Esc` | Back from idea detail / tag view / settings / cancel |
 
 ## Quick start
 

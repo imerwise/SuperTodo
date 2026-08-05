@@ -72,6 +72,7 @@ const COMMANDS = [
   { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
   { key: "T", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
   { key: "K", label: "Tags", action: openTagList, modes: ["todo", "ideas"] },
+  { key: "S", label: "Settings", action: openSettings, modes: ["todo", "ideas"] },
 ];
 
 // View state.
@@ -91,6 +92,30 @@ let activeTag = null; // when set, the app shows the results for one tag
 let tagListView = false; // when true, the app shows the browsable Tags view
 let filterCameFromList = false; // whether the active results were opened from the Tags view
 let tagFilterReturn = null; // { mode, current } to restore when the whole tag flow exits
+
+// Settings state.
+let settingsView = false; // when true, the app shows the Settings view
+let settingsReturn = null; // { mode, current } to restore when Settings is closed
+const SETTINGS_KEY = "supertodo.settings";
+let settings = {
+  // Default on first launch: input order. Users can switch to alphabetical in Settings.
+  sortTagsAlpha: false, // sort tag chips alphabetically (vs. input order) on rows
+};
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) settings = Object.assign(settings, JSON.parse(raw));
+  } catch (e) {
+    console.log("[ui] loadSettings failed", e);
+  }
+}
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    console.log("[ui] saveSettings failed", e);
+  }
+}
 
 // Idea state.
 let ideas = []; // list of IdeaListEntry
@@ -160,6 +185,23 @@ function stripTags(text) {
     .trim();
 }
 
+// Tag names sorted alphabetically (case-insensitive) — the order chips are shown
+// in on rows.
+function sortTagsAlpha(tags) {
+  return [...tags].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+// Append a row of tag chips to `container` — alphabetical or in input order per
+// the Settings toggle. No-op for empty tags.
+function appendTagChips(container, tags) {
+  if (!tags || !tags.length) return;
+  const row = document.createElement("span");
+  row.className = "todo-tags";
+  const ordered = settings.sortTagsAlpha ? sortTagsAlpha(tags) : tags;
+  ordered.forEach((t) => row.appendChild(makeTagChip(t)));
+  container.appendChild(row);
+}
+
 // Populate a todo `.label` span: the (tag-stripped) task text, then a chip row
 // underneath for `tags`. XSS-safe — text via textContent, chips via createElement.
 function fillTodoLabel(label, text, tags) {
@@ -170,12 +212,7 @@ function fillTodoLabel(label, text, tags) {
   textSpan.textContent = stripped || text;
   label.appendChild(textSpan);
 
-  if (tags && tags.length) {
-    const row = document.createElement("span");
-    row.className = "todo-tags";
-    tags.forEach((t) => row.appendChild(makeTagChip(t)));
-    label.appendChild(row);
-  }
+  appendTagChips(label, tags);
 }
 
 // A clickable chip that opens the global filter for `tag`. The chip shows the
@@ -311,8 +348,8 @@ function attachTagAutocomplete(input) {
 }
 
 function render(data, fx = null) {
-  // The tag views own the screen; ignore stray day/idea renders underneath.
-  if (activeTag || tagListView) return;
+  // The tag/settings views own the screen; ignore stray day/idea renders.
+  if (activeTag || tagListView || settingsView) return;
   if (mode === "ideas") {
     renderIdeas(data);
   } else {
@@ -561,12 +598,7 @@ function renderIdeas(data) {
     dateSpan.textContent = `Created on ${idea.created}`;
     label.appendChild(dateSpan);
 
-    if (idea.tags && idea.tags.length) {
-      const tagRow = document.createElement("span");
-      tagRow.className = "todo-tags";
-      idea.tags.forEach((t) => tagRow.appendChild(makeTagChip(t)));
-      label.appendChild(tagRow);
-    }
+    appendTagChips(label, idea.tags);
 
     li.appendChild(label);
 
@@ -1221,6 +1253,16 @@ function updateHints(force = null) {
     return;
   }
 
+  // Settings view hints
+  if (settingsView) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+      ["Space", "Toggle"],
+      ["Esc", "Back"],
+    ])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
   // Tags view hints
   if (tagListView) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
@@ -1553,6 +1595,86 @@ function renderTagList() {
   updateHints();
 }
 
+// --- settings view --------------------------------------------------------
+
+function openSettings() {
+  hideEmojiPicker();
+  settingsReturn = { mode, current };
+  settingsView = true;
+  activeTag = null;
+  tagListView = false;
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  ideaDetailSlug = null;
+  inputEl.blur();
+  renderSettings();
+}
+
+function exitSettings() {
+  const ret = settingsReturn || { mode: "todo", current: null };
+  settingsView = false;
+  settingsReturn = null;
+  if (ret.mode === "ideas") {
+    switchMode("ideas");
+  } else {
+    mode = "todo";
+    prevBtn.style.display = "";
+    nextBtn.style.display = "";
+    if (ret.current) goTo(ret.current);
+    else goToday();
+  }
+}
+
+function setTagSort(alpha) {
+  if (settings.sortTagsAlpha === alpha) return;
+  settings.sortTagsAlpha = alpha;
+  saveSettings();
+  renderSettings();
+}
+
+function renderSettings() {
+  weekdayEl.textContent = "";
+  dateEl.textContent = "Settings";
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  composerEl.style.display = "none";
+  listEl.innerHTML = "";
+  emptyEl.hidden = true;
+
+  const row = document.createElement("li");
+  row.className = "settings-row";
+
+  const info = document.createElement("div");
+  info.className = "settings-info";
+  const title = document.createElement("div");
+  title.className = "settings-title";
+  title.textContent = "Tag order on rows";
+  const desc = document.createElement("div");
+  desc.className = "settings-desc";
+  desc.textContent = "How tag chips are ordered on todo and idea rows.";
+  info.append(title, desc);
+  row.appendChild(info);
+
+  // Segmented control: Alphabetical | Input order. Space also toggles.
+  const seg = document.createElement("div");
+  seg.className = "settings-seg";
+  const mk = (label, alpha) => {
+    const b = document.createElement("button");
+    b.className = "seg-btn" + (settings.sortTagsAlpha === alpha ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => setTagSort(alpha));
+    return b;
+  };
+  seg.append(mk("Alphabetical", true), mk("Input order", false));
+  row.appendChild(seg);
+
+  listEl.appendChild(row);
+  updateHints();
+}
+
 function renderTagFilter(result) {
   weekdayEl.textContent = "";
   dateEl.textContent = result.tag;
@@ -1629,12 +1751,7 @@ function renderTagFilter(result) {
       txt.className = "label-text";
       txt.textContent = idea.title;
       label.appendChild(txt);
-      if (idea.tags && idea.tags.length) {
-        const tagRow = document.createElement("span");
-        tagRow.className = "todo-tags";
-        idea.tags.forEach((t) => tagRow.appendChild(makeTagChip(t)));
-        label.appendChild(tagRow);
-      }
+      appendTagChips(label, idea.tags);
       li.appendChild(label);
       li.addEventListener("click", () => openIdeaFromFilter(idea.slug));
       listEl.appendChild(li);
@@ -1832,6 +1949,18 @@ nextBtn.addEventListener("click", () => goTo(addDays(current, 1), 1));
 todayBtn.addEventListener("click", goToday);
 
 document.addEventListener("keydown", (e) => {
+  // Settings view: Space/Enter toggles the tag-order setting, Escape leaves.
+  if (settingsView) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      exitSettings();
+    } else if (e.key === " " || e.key === "Enter") {
+      e.preventDefault();
+      setTagSort(!settings.sortTagsAlpha);
+    }
+    return;
+  }
+
   // The browsable Tags view: arrows move the cursor, Enter opens the selected
   // tag's results, Escape leaves the tag flow. Everything else is swallowed.
   if (tagListView) {
@@ -2089,5 +2218,6 @@ document.addEventListener("keyup", (e) => {
   }
 });
 
+loadSettings();
 refreshTags();
 goToday();
