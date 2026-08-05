@@ -834,76 +834,91 @@ fn get_tags() -> Vec<String> {
 }
 
 // --- persistent chip colors (tags.json) ------------------------------------
-// tags.json records each tag's chip color explicitly, plus `next` — the color to
-// hand the next brand-new tag, advanced 1→10→1 so colors follow creation order
-// and loop. A tag keeps its stored color for as long as it is used; when it is no
-// longer referenced anywhere it is pruned from the file. `next` is monotonic
-// (never rewound by a prune), so creation-order looping survives deletions.
+// tags.json is a flat { "tag": color } map. A tag keeps its stored color for as
+// long as it is used; when it is no longer referenced anywhere it is pruned. A
+// new tag takes the first available color — the lowest-numbered palette slot not
+// currently used by another live tag — so pruning frees a color for reuse. Once
+// all ten are in use, the least-used slot (lowest number on a tie) is chosen.
 
-#[derive(Serialize, Deserialize, Default)]
-struct TagColors {
-    #[serde(default)]
-    next: u8,
-    #[serde(default)]
-    map: std::collections::HashMap<String, u8>, // lowercased tag -> color 1..10
-}
+type TagColorMap = std::collections::HashMap<String, u8>; // lowercased tag -> 1..10
 
 fn tags_colors_path(dir: &PathBuf) -> PathBuf {
     dir.join("tags.json")
 }
 
-fn read_tag_colors(dir: &PathBuf) -> TagColors {
-    // A parse failure (including the legacy array format from an earlier build)
-    // yields an empty set, which the reconcile below then repopulates.
-    let mut c: TagColors = fs::read_to_string(tags_colors_path(dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    if c.next < 1 || c.next > 10 {
-        c.next = 1;
+fn read_tag_colors(dir: &PathBuf) -> TagColorMap {
+    let s = fs::read_to_string(tags_colors_path(dir)).unwrap_or_default();
+    // Current flat format.
+    if let Ok(m) = serde_json::from_str::<TagColorMap>(&s) {
+        return m;
     }
-    c
+    // Legacy { next, map } object from an earlier build — keep the colors.
+    #[derive(Deserialize)]
+    struct Legacy {
+        #[serde(default)]
+        map: TagColorMap,
+    }
+    if let Ok(l) = serde_json::from_str::<Legacy>(&s) {
+        return l.map;
+    }
+    // Anything else (e.g. the oldest array format) starts empty.
+    TagColorMap::new()
 }
 
-fn write_tag_colors(dir: &PathBuf, c: &TagColors) {
-    if let Ok(json) = serde_json::to_string_pretty(c) {
+fn write_tag_colors(dir: &PathBuf, map: &TagColorMap) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
         let _ = fs::write(tags_colors_path(dir), json);
     }
 }
 
+/// The lowest-numbered palette color (1..=10) least used by the current map.
+fn first_available_color(map: &TagColorMap) -> u8 {
+    let mut counts = [0u32; 11]; // index 1..=10
+    for &c in map.values() {
+        if (1..=10).contains(&c) {
+            counts[c as usize] += 1;
+        }
+    }
+    let mut best = 1u8;
+    for c in 2..=10u8 {
+        if counts[c as usize] < counts[best as usize] {
+            best = c;
+        }
+    }
+    best
+}
+
 /// The tag -> color map (keys lowercased), reconciled against what's actually in
 /// use: orphaned tags are pruned, and any in-use tag without a color is assigned
-/// the next color in the looping sequence (in creation order). Because the UI
-/// refreshes after every mutation, a freshly created tag is the sole new entry
-/// and takes the next color, leaving existing tags' colors untouched.
+/// the first available color. Existing tags' colors are never changed.
 #[tauri::command]
-fn get_tag_colors() -> std::collections::HashMap<String, u8> {
+fn get_tag_colors() -> TagColorMap {
     use std::collections::HashSet;
     let dir = storage_dir();
-    let mut c = read_tag_colors(&dir);
+    let mut map = read_tag_colors(&dir);
 
     let in_use = tags_in_creation_order(&dir); // display forms, creation order
     let in_use_lower: HashSet<String> = in_use.iter().map(|t| t.to_lowercase()).collect();
 
     let mut changed = false;
-    let before = c.map.len();
-    c.map.retain(|k, _| in_use_lower.contains(k));
-    if c.map.len() != before {
+    let before = map.len();
+    map.retain(|k, _| in_use_lower.contains(k));
+    if map.len() != before {
         changed = true;
     }
     for t in &in_use {
         let key = t.to_lowercase();
-        if !c.map.contains_key(&key) {
-            c.map.insert(key, c.next);
-            c.next = (c.next % 10) + 1;
+        if !map.contains_key(&key) {
+            let color = first_available_color(&map);
+            map.insert(key, color);
             changed = true;
         }
     }
 
     if changed {
-        write_tag_colors(&dir, &c);
+        write_tag_colors(&dir, &map);
     }
-    c.map
+    map
 }
 
 /// Returns every todo (across all day files) and every idea whose tags include
