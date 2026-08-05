@@ -28,6 +28,10 @@ struct TodoItem {
     // carry-over idempotent — a rolled item is never carried again.
     rolled: bool,
     text: String,
+    // Hashtags found inline in `text` (e.g. "#work"). Derived on read, never
+    // stored separately — `text` keeps the raw "#tag" so format_item round-trips
+    // unchanged and carry-over is untouched.
+    tags: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -50,14 +54,20 @@ struct IdeaData {
     title: String,
     description: String,
     created: String, // ISO date "2026-08-04"
+    // Structured tags, edited via the detail-view tag box. Authoritative store
+    // is the ideas index (like emoji/created) — not parsed from title/body.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct IdeaListEntry {
     slug: String,
     emoji: String,
     title: String,
     created: String,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 // --- paths -----------------------------------------------------------------
@@ -95,6 +105,39 @@ fn status_char(line: &str) -> Option<char> {
     }
 }
 
+/// Extracts inline hashtags ("#work", "#big-idea") from arbitrary text. A tag is
+/// `#` followed by one or more of [A-Za-z0-9_-]. Order-preserving, deduped
+/// case-insensitively, returned without the leading `#`.
+fn extract_tags(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j > start {
+                let tag = &text[start..j];
+                if !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                    out.push(tag.to_string());
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 fn parse_item(line: &str) -> Option<TodoItem> {
     let status = status_char(line)?;
     let checked = status == 'x' || status == 'X';
@@ -108,11 +151,13 @@ fn parse_item(line: &str) -> Option<TodoItem> {
     if rest.is_empty() {
         return None;
     }
+    let tags = extract_tags(rest);
     Some(TodoItem {
         checked,
         carried,
         rolled,
         text: rest.to_string(),
+        tags,
     })
 }
 
@@ -161,6 +206,73 @@ fn ideas_index_path(dir: &PathBuf) -> PathBuf {
 
 fn idea_file_path(ideas: &PathBuf, slug: &str) -> PathBuf {
     ideas.join(format!("{}.md", slug))
+}
+
+// --- global tag vocabulary -------------------------------------------------
+// The shared hashtag list is *derived on demand*, never persisted: it is exactly
+// the set of tags currently in use across all todos and ideas. This makes orphan
+// tags structurally impossible — a tag exists iff something still carries it —
+// and stays correct even when the plain-text files are hand-edited or a task is
+// carried over into a new day file.
+
+/// Returns every in-use tag ordered by **first appearance** — the earliest date
+/// (todo day-file date or idea `created` date) on which the tag shows up, with an
+/// alphabetical tie-break within a day. This order is what drives the looping
+/// chip-color assignment: it is stable as tags are added (a new tag lands at the
+/// end) and is derived purely from the files, so it needs no persisted state.
+fn tags_in_creation_order(dir: &PathBuf) -> Vec<String> {
+    use std::collections::HashMap;
+    // lowercased tag -> (earliest ISO date, first-seen display form)
+    let mut first: HashMap<String, (String, String)> = HashMap::new();
+
+    fn note(first: &mut HashMap<String, (String, String)>, tag: &str, date: &str) {
+        if tag.is_empty() {
+            return;
+        }
+        let key = tag.to_lowercase();
+        let replace = match first.get(&key) {
+            Some((d, _)) => date < d.as_str(),
+            None => true,
+        };
+        if replace {
+            first.insert(key, (date.to_string(), tag.to_string()));
+        }
+    }
+
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(digits) = name.strip_prefix("todo_").and_then(|s| s.strip_suffix(".txt")) {
+                if let Ok(d) = NaiveDate::parse_from_str(digits, "%Y%m%d") {
+                    let iso = d.format("%Y-%m-%d").to_string();
+                    for item in read_items(&entry.path()) {
+                        for t in &item.tags {
+                            note(&mut first, t, &iso);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for entry in read_ideas_index(dir) {
+        // Ideas with no recorded date sort last but stay included.
+        let iso = if entry.created.is_empty() {
+            "9999-12-31".to_string()
+        } else {
+            entry.created.clone()
+        };
+        for t in &entry.tags {
+            note(&mut first, t, &iso);
+        }
+    }
+
+    let mut items: Vec<(String, String)> = first.into_values().collect(); // (date, display)
+    items.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    items.into_iter().map(|(_, name)| name).collect()
 }
 
 fn slugify(title: &str) -> String {
@@ -236,6 +348,7 @@ fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
         title,
         description,
         created: String::new(), // not stored in file anymore
+        tags: Vec::new(),       // merged in from the index by get_idea
     })
 }
 
@@ -318,6 +431,7 @@ fn ensure_today(dir: &PathBuf, today: NaiveDate) -> PathBuf {
                         carried: true,
                         rolled: false,
                         text: item.text.clone(),
+                        tags: item.tags.clone(),
                     });
                     let mark = if item.carried {
                         format!("{} ", CARRY_MARK)
@@ -404,11 +518,13 @@ fn add_task(date: String, text: String) -> DayData {
             file_for(&dir, d)
         };
         let mut items = read_items(&path);
+        let tags = extract_tags(&text);
         items.push(TodoItem {
             checked: false,
             carried: false,
             rolled: false,
             text,
+            tags,
         });
         write_items(&path, &items);
     }
@@ -426,6 +542,7 @@ fn edit_task(date: String, index: usize, text: String) -> DayData {
         if path.exists() {
             let mut items = read_items(&path);
             if let Some(item) = items.get_mut(index) {
+                item.tags = extract_tags(&text);
                 item.text = text;
                 write_items(&path, &items);
             }
@@ -547,6 +664,7 @@ fn add_idea(title: String) -> AddIdeaResult {
         title: title.clone(),
         description: String::new(),
         created: created.clone(),
+        tags: Vec::new(),
     };
     write_idea_md(&ideas, &idea);
 
@@ -556,6 +674,7 @@ fn add_idea(title: String) -> AddIdeaResult {
         emoji: String::from("💡"),
         title,
         created,
+        tags: Vec::new(),
     });
     write_ideas_index(&dir, &entries);
     let result = read_ideas_index(&dir);
@@ -574,6 +693,7 @@ fn get_idea(slug: String) -> Option<IdeaData> {
     if let Some(entry) = entries.iter().find(|e| e.slug == slug) {
         result.emoji = entry.emoji.clone();
         result.created = entry.created.clone();
+        result.tags = entry.tags.clone();
     }
     eprintln!("[ideas] COMMAND get_idea: result={:?}", (&result.title, &result.emoji, result.description.len()));
     Some(result)
@@ -585,9 +705,25 @@ struct EditIdeaResult {
     new_slug: Option<String>,
 }
 
+/// Cleans a caller-supplied tag list: strips any leading '#', trims, drops
+/// empties, and dedupes case-insensitively (first-seen form kept).
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim().trim_start_matches('#').trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|e: &String| e.eq_ignore_ascii_case(t)) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
 #[tauri::command]
-fn edit_idea(slug: String, emoji: Option<String>, title: Option<String>, description: Option<String>) -> EditIdeaResult {
-    eprintln!("[ideas] COMMAND edit_idea: slug={} emoji={:?} title={:?} description_len={:?}", slug, emoji, title, description.as_ref().map(|d| d.len()));
+fn edit_idea(slug: String, emoji: Option<String>, title: Option<String>, description: Option<String>, tags: Option<Vec<String>>) -> EditIdeaResult {
+    eprintln!("[ideas] COMMAND edit_idea: slug={} emoji={:?} title={:?} description_len={:?} tags={:?}", slug, emoji, title, description.as_ref().map(|d| d.len()), tags);
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
     let mut entries = read_ideas_index(&dir);
@@ -634,6 +770,11 @@ fn edit_idea(slug: String, emoji: Option<String>, title: Option<String>, descrip
     if let Some(d) = description {
         idea.description = d;
     }
+    if let Some(t) = tags {
+        let clean = normalize_tags(&t);
+        entries[idx].tags = clean.clone();
+        idea.tags = clean;
+    }
 
     write_idea_md(&ideas, &idea);
     if !slug_changed {
@@ -664,6 +805,86 @@ fn delete_idea(slug: String) -> Vec<IdeaListEntry> {
     entries
 }
 
+// --- tag commands ----------------------------------------------------------
+
+/// One todo that matched a tag query, carrying its source day so the UI can
+/// show and navigate to it.
+#[derive(Serialize)]
+struct TaggedTodo {
+    date: String, // YYYY-MM-DD
+    checked: bool,
+    rolled: bool,
+    text: String,
+    tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TaggedResult {
+    tag: String,
+    todos: Vec<TaggedTodo>,
+    ideas: Vec<IdeaListEntry>,
+}
+
+/// Tags in first-appearance order. The frontend assigns chip colors by this
+/// order (looping over the palette) and sorts its own copy for menus.
+#[tauri::command]
+fn get_tags() -> Vec<String> {
+    let dir = storage_dir();
+    tags_in_creation_order(&dir)
+}
+
+/// Returns every todo (across all day files) and every idea whose tags include
+/// `tag` (case-insensitive). Read-only: it never rewrites any file.
+#[tauri::command]
+fn get_tagged(tag: String) -> TaggedResult {
+    let dir = storage_dir();
+    let needle = tag.trim().trim_start_matches('#').trim().to_string();
+
+    let mut todos: Vec<TaggedTodo> = Vec::new();
+    if !needle.is_empty() {
+        // Collect matching todos from every todo_YYYYMMDD.txt, newest day first.
+        let mut dated: Vec<(NaiveDate, PathBuf)> = Vec::new();
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(digits) = name
+                    .strip_prefix("todo_")
+                    .and_then(|s| s.strip_suffix(".txt"))
+                {
+                    if let Ok(date) = NaiveDate::parse_from_str(digits, "%Y%m%d") {
+                        dated.push((date, entry.path()));
+                    }
+                }
+            }
+        }
+        dated.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
+        for (date, path) in dated {
+            for item in read_items(&path) {
+                if item.tags.iter().any(|t| t.eq_ignore_ascii_case(&needle)) {
+                    todos.push(TaggedTodo {
+                        date: date.format("%Y-%m-%d").to_string(),
+                        checked: item.checked,
+                        rolled: item.rolled,
+                        text: item.text,
+                        tags: item.tags,
+                    });
+                }
+            }
+        }
+    }
+
+    let ideas: Vec<IdeaListEntry> = if needle.is_empty() {
+        Vec::new()
+    } else {
+        read_ideas_index(&dir)
+            .into_iter()
+            .filter(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case(&needle)))
+            .collect()
+    };
+
+    TaggedResult { tag: needle, todos, ideas }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -680,7 +901,9 @@ pub fn run() {
             add_idea,
             get_idea,
             edit_idea,
-            delete_idea
+            delete_idea,
+            get_tags,
+            get_tagged
         ])
         .run(tauri::generate_context!())
         .expect("error while running SuperTodo");

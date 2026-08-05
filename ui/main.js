@@ -71,6 +71,7 @@ const COMMANDS = [
   { key: "T", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
   { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
   { key: "T", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
+  { key: "K", label: "Tags", action: showTagPicker, modes: ["todo", "ideas"] },
 ];
 
 // View state.
@@ -83,6 +84,11 @@ let cancelEdit = false; // set when an edit is aborted via Escape
 let dragState = null; // active pointer-drag state, or null
 let selectedIndex = null; // keyboard-highlighted row, or null
 let pendingDeleteIndex = null; // row showing inline delete confirmation, or null
+
+// Tag state.
+let tagCache = []; // all known tags (from get_tags), for autocomplete
+let activeTag = null; // when set, the app shows the global tag-filter view
+let tagFilterReturn = null; // { mode, current } to restore when the filter is cleared
 
 // Idea state.
 let ideas = []; // list of IdeaListEntry
@@ -100,7 +106,210 @@ function addDays(iso, n) {
   return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
 }
 
+// --- hashtags -------------------------------------------------------------
+
+// Number of chip colors; tag N (by creation order) uses color ((N-1) % this) + 1.
+const TAG_COLORS = 10;
+
+// lowercased tag -> color slot (1..TAG_COLORS), keyed by creation order.
+let tagColor = {};
+
+// Refresh the cached tag vocabulary (in creation order) used by autocomplete and
+// for the looping chip-color assignment. Cheap; called at startup and after any
+// mutation that may introduce or remove a tag.
+async function refreshTags() {
+  try {
+    tagCache = await invoke("get_tags"); // creation order
+    tagColor = {};
+    tagCache.forEach((t, i) => {
+      tagColor[t.toLowerCase()] = (i % TAG_COLORS) + 1;
+    });
+  } catch (e) {
+    console.log("[ui] refreshTags failed", e);
+  }
+}
+
+// The color slot for a tag. Falls back to a deterministic slot for a tag not yet
+// in the cache (e.g. rendered in the instant before a refresh completes), so a
+// chip is never left uncolored and the fallback stays stable per tag.
+function colorForTag(tag) {
+  const key = tag.toLowerCase();
+  if (tagColor[key]) return tagColor[key];
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h + key.charCodeAt(i)) % TAG_COLORS;
+  return h + 1;
+}
+
+// Tags sorted alphabetically — used for menus/pickers (the cache itself is kept
+// in creation order for color assignment).
+function sortedTags() {
+  return [...tagCache].sort((a, b) =>
+    a.toLowerCase().localeCompare(b.toLowerCase())
+  );
+}
+
+// The task text with its "#tag" tokens removed and whitespace tidied — what we
+// show on the task line, since the tags are rendered separately as chips below.
+function stripTags(text) {
+  return text
+    .replace(/#[A-Za-z0-9_-]+/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Populate a todo `.label` span: the (tag-stripped) task text, then a chip row
+// underneath for `tags`. XSS-safe — text via textContent, chips via createElement.
+function fillTodoLabel(label, text, tags) {
+  const textSpan = document.createElement("span");
+  textSpan.className = "label-text";
+  const stripped = stripTags(text);
+  // Fall back to the raw text for a task that is nothing but tags.
+  textSpan.textContent = stripped || text;
+  label.appendChild(textSpan);
+
+  if (tags && tags.length) {
+    const row = document.createElement("span");
+    row.className = "todo-tags";
+    tags.forEach((t) => row.appendChild(makeTagChip(t)));
+    label.appendChild(row);
+  }
+}
+
+// A clickable chip that opens the global filter for `tag`. The chip shows the
+// bare tag name (no leading '#') — its pill styling is what marks it as a tag.
+function makeTagChip(tag) {
+  const chip = document.createElement("span");
+  chip.className = "tag-chip tag-c" + colorForTag(tag);
+  chip.textContent = tag;
+  chip.dataset.tag = tag;
+  chip.title = "Filter by " + tag;
+  chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openTagFilter(tag);
+  });
+  return chip;
+}
+
+// Attach "#"-triggered tag autocomplete to a text <input> or <textarea>. When
+// the caret sits inside a "#partial" token, a dropdown of matching known tags
+// is shown; selecting one (click / Enter / Tab) completes the token. Keyboard
+// handling is in the capture phase so it wins over the field's own Enter/Escape
+// handlers while the menu is open.
+function attachTagAutocomplete(input) {
+  let menu = null;
+  let items = [];
+  let active = -1;
+  let range = null; // [tokenStart, caret] of the "#partial" being completed
+
+  function close() {
+    if (menu) {
+      menu.remove();
+      menu = null;
+    }
+    items = [];
+    active = -1;
+    range = null;
+  }
+
+  function currentToken() {
+    const caret = input.selectionStart;
+    if (caret === null || caret !== input.selectionEnd) return null;
+    const before = input.value.slice(0, caret);
+    const m = before.match(/#([A-Za-z0-9_-]*)$/);
+    if (!m) return null;
+    return { partial: m[1], start: caret - m[1].length - 1, caret };
+  }
+
+  function update() {
+    const tok = currentToken();
+    if (!tok) {
+      close();
+      return;
+    }
+    const p = tok.partial.toLowerCase();
+    const matches = sortedTags()
+      .filter((t) => t.toLowerCase().startsWith(p) && t.toLowerCase() !== p)
+      .slice(0, 8);
+    if (matches.length === 0) {
+      close();
+      return;
+    }
+    items = matches;
+    range = [tok.start, tok.caret];
+    active = 0;
+    draw();
+  }
+
+  function draw() {
+    if (!menu) {
+      menu = document.createElement("div");
+      menu.className = "tag-autocomplete";
+      document.body.appendChild(menu);
+    }
+    menu.innerHTML = "";
+    items.forEach((t, i) => {
+      const opt = document.createElement("div");
+      opt.className = "tag-option" + (i === active ? " active" : "");
+      opt.textContent = t;
+      // mousedown (not click) so selection happens before the input blurs.
+      opt.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        choose(i);
+      });
+      menu.appendChild(opt);
+    });
+    const r = input.getBoundingClientRect();
+    menu.style.left = r.left + "px";
+    menu.style.top = r.bottom + 2 + "px";
+    menu.style.minWidth = r.width + "px";
+  }
+
+  function choose(i) {
+    if (!range || !items[i]) return;
+    const [start, caret] = range;
+    const v = input.value;
+    const insert = "#" + items[i] + " ";
+    input.value = v.slice(0, start) + insert + v.slice(caret);
+    const pos = start + insert.length;
+    input.setSelectionRange(pos, pos);
+    close();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
+
+  input.addEventListener("input", update);
+  input.addEventListener("blur", () => setTimeout(close, 120));
+  input.addEventListener(
+    "keydown",
+    (e) => {
+      if (!menu) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        active = (active + 1) % items.length;
+        draw();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        active = (active - 1 + items.length) % items.length;
+        draw();
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        choose(active);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      }
+    },
+    true // capture: run before the field's own keydown handler
+  );
+}
+
 function render(data, fx = null) {
+  // The global tag-filter view owns the screen; ignore stray day/idea renders.
+  if (activeTag) return;
   if (mode === "ideas") {
     renderIdeas(data);
   } else {
@@ -205,15 +414,13 @@ function renderTodo(data, fx = null) {
         }
       });
       input.addEventListener("blur", () => commitEdit(index, input.value));
+      attachTagAutocomplete(input);
       li.appendChild(input);
       editInputRef = input;
     } else {
       const label = document.createElement("span");
       label.className = "label";
-      const textSpan = document.createElement("span");
-      textSpan.className = "label-text";
-      textSpan.textContent = item.text;
-      label.appendChild(textSpan);
+      fillTodoLabel(label, item.text, item.tags);
       li.appendChild(label);
 
       if (item.rolled) {
@@ -350,6 +557,14 @@ function renderIdeas(data) {
     dateSpan.className = "idea-date-sub";
     dateSpan.textContent = `Created on ${idea.created}`;
     label.appendChild(dateSpan);
+
+    if (idea.tags && idea.tags.length) {
+      const tagRow = document.createElement("span");
+      tagRow.className = "todo-tags";
+      idea.tags.forEach((t) => tagRow.appendChild(makeTagChip(t)));
+      label.appendChild(tagRow);
+    }
+
     li.appendChild(label);
 
     if (pendingDeleteIndex === index) {
@@ -477,6 +692,9 @@ function renderIdeaDetail(slug) {
     createdLine.textContent = `Created: ${idea.created}`;
     detail.appendChild(createdLine);
 
+    // Tags — a token box: removable chips + an autocompleting add input.
+    detail.appendChild(buildIdeaTagBox(idea));
+
     // Description textarea
     const descLabel = document.createElement("div");
     descLabel.className = "detail-desc-label";
@@ -507,6 +725,186 @@ function renderIdeaDetail(slug) {
     textarea.focus();
     updateHints();
   });
+}
+
+// A token box for an idea's tags: removable chips plus an add-input with
+// autocomplete over the shared vocabulary. Each add/remove persists immediately
+// via editIdea, so tags survive even if the detail view is closed without
+// touching the title/description.
+function buildIdeaTagBox(idea) {
+  const wrap = document.createElement("div");
+  wrap.className = "detail-tags";
+
+  const label = document.createElement("div");
+  label.className = "detail-desc-label";
+  label.textContent = "Tags";
+  wrap.appendChild(label);
+
+  const box = document.createElement("div");
+  box.className = "tag-box";
+  wrap.appendChild(box);
+
+  let tags = (idea.tags || []).slice();
+
+  const input = document.createElement("input");
+  input.className = "tag-box-input";
+  input.type = "text";
+  input.placeholder = "Add tag…";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+
+  function save() {
+    idea.tags = tags.slice();
+    editIdea(idea.slug, null, null, null, tags.slice());
+  }
+
+  function addTag(raw) {
+    const t = (raw || "").trim().replace(/^#+/, "").trim();
+    if (!t || !/^[A-Za-z0-9_-]+$/.test(t)) return;
+    if (tags.some((x) => x.toLowerCase() === t.toLowerCase())) return;
+    tags.push(t);
+    save();
+    redraw();
+    input.focus();
+  }
+
+  function removeTag(t) {
+    tags = tags.filter((x) => x !== t);
+    save();
+    redraw();
+    input.focus();
+  }
+
+  function redraw() {
+    box.innerHTML = "";
+    tags.forEach((t) => {
+      const chip = document.createElement("span");
+      chip.className = "tag-chip removable tag-c" + colorForTag(t);
+      const txt = document.createElement("span");
+      txt.className = "tag-chip-text";
+      txt.textContent = t;
+      // Clicking the chip body opens the global filter for this tag.
+      txt.addEventListener("click", () => openTagFilter(t));
+      chip.appendChild(txt);
+      const x = document.createElement("button");
+      x.className = "tag-x";
+      x.textContent = "×";
+      x.title = "Remove tag";
+      x.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeTag(t);
+      });
+      chip.appendChild(x);
+      box.appendChild(chip);
+    });
+    box.appendChild(input);
+  }
+
+  // Autocomplete dropdown (bare tag names — no '#' needed to search).
+  let menu = null;
+  let mItems = [];
+  let mActive = -1;
+  function closeMenu() {
+    if (menu) {
+      menu.remove();
+      menu = null;
+    }
+    mItems = [];
+    mActive = -1;
+  }
+  function updateMenu() {
+    const p = input.value.trim().replace(/^#+/, "").toLowerCase();
+    if (!p) {
+      closeMenu();
+      return;
+    }
+    const matches = sortedTags()
+      .filter(
+        (t) =>
+          t.toLowerCase().startsWith(p) &&
+          !tags.some((x) => x.toLowerCase() === t.toLowerCase())
+      )
+      .slice(0, 8);
+    if (matches.length === 0) {
+      closeMenu();
+      return;
+    }
+    mItems = matches;
+    mActive = 0;
+    drawMenu();
+  }
+  function drawMenu() {
+    if (!menu) {
+      menu = document.createElement("div");
+      menu.className = "tag-autocomplete";
+      document.body.appendChild(menu);
+    }
+    menu.innerHTML = "";
+    mItems.forEach((t, i) => {
+      const opt = document.createElement("div");
+      opt.className = "tag-option" + (i === mActive ? " active" : "");
+      opt.textContent = t;
+      opt.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        input.value = "";
+        addTag(t);
+        closeMenu();
+      });
+      menu.appendChild(opt);
+    });
+    const r = input.getBoundingClientRect();
+    menu.style.left = r.left + "px";
+    menu.style.top = r.bottom + 2 + "px";
+    menu.style.minWidth = "140px";
+  }
+
+  input.addEventListener("input", updateMenu);
+  input.addEventListener("blur", () => setTimeout(closeMenu, 120));
+  input.addEventListener("keydown", (e) => {
+    if (menu) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        mActive = (mActive + 1) % mItems.length;
+        drawMenu();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        mActive = (mActive - 1 + mItems.length) % mItems.length;
+        drawMenu();
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        input.value = "";
+        addTag(mItems[mActive]);
+        closeMenu();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMenu();
+        return;
+      }
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      addTag(input.value);
+      input.value = "";
+    } else if (e.key === "Backspace" && input.value === "" && tags.length) {
+      e.stopPropagation();
+      removeTag(tags[tags.length - 1]);
+    }
+    // Escape with no menu is left to bubble so the detail view can exit.
+  });
+
+  redraw();
+  return wrap;
 }
 
 // --- emoji picker ---------------------------------------------------------
@@ -601,14 +999,16 @@ async function addIdea(text) {
   console.log("[ui] addIdea: done");
 }
 
-async function editIdea(slug, emoji, title, description) {
-  console.log("[ui] editIdea: slug=", slug, "emoji=", emoji, "title=", title, "description_len=", description && description.length);
+async function editIdea(slug, emoji, title, description, tags = null) {
+  console.log("[ui] editIdea: slug=", slug, "emoji=", emoji, "title=", title, "description_len=", description && description.length, "tags=", tags);
   const args = { slug };
   if (emoji !== null) args.emoji = emoji;
   if (title !== null) args.title = title;
   if (description !== null) args.description = description;
+  if (tags !== null) args.tags = tags;
   const result = await invoke("edit_idea", args);
   ideas = result.entries;
+  refreshTags();
   console.log("[ui] editIdea: done,", ideas.length, "ideas, new_slug=", result.new_slug);
   return { ideas: result.entries, newSlug: result.new_slug };
 }
@@ -815,6 +1215,16 @@ function updateHints(force = null) {
     return;
   }
 
+  // Global tag-filter view hints
+  if (activeTag) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+      ["⏎/Click", "Open"],
+      ["Esc", "Clear filter"],
+    ])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
   // Idea detail view hints
   if (mode === "ideas" && ideaDetailSlug) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
@@ -986,6 +1396,194 @@ async function goTo(iso, dir = 0) {
   );
 }
 
+// --- global tag filter view ----------------------------------------------
+
+// Enter the cross-cutting view listing every todo (any day) and idea carrying
+// `tag`. Remembers where we came from so clearing the filter returns there.
+async function openTagFilter(tag) {
+  if (!tag) return;
+  hideEmojiPicker();
+  if (!activeTag) tagFilterReturn = { mode, current };
+  activeTag = tag;
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  ideaDetailSlug = null;
+  inputEl.blur();
+  const result = await invoke("get_tagged", { tag });
+  renderTagFilter(result);
+}
+
+function clearTagFilter() {
+  const ret = tagFilterReturn || { mode: "todo", current: null };
+  activeTag = null;
+  tagFilterReturn = null;
+  if (ret.mode === "ideas") {
+    switchMode("ideas");
+  } else {
+    mode = "todo";
+    prevBtn.style.display = "";
+    nextBtn.style.display = "";
+    if (ret.current) goTo(ret.current);
+    else goToday();
+  }
+}
+
+// Leave the filter and open a specific day / idea from a result row.
+function jumpToDay(date) {
+  activeTag = null;
+  tagFilterReturn = null;
+  mode = "todo";
+  prevBtn.style.display = "";
+  nextBtn.style.display = "";
+  goTo(date);
+}
+
+async function openIdeaFromFilter(slug) {
+  activeTag = null;
+  tagFilterReturn = null;
+  mode = "ideas";
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  inputEl.placeholder = "Add an idea…";
+  ideas = await invoke("get_ideas");
+  renderIdeaDetail(slug);
+}
+
+function renderTagFilter(result) {
+  weekdayEl.textContent = "";
+  dateEl.textContent = result.tag;
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  composerEl.style.display = "none";
+  listEl.innerHTML = "";
+
+  const total = result.todos.length + result.ideas.length;
+  if (total === 0) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = `Nothing tagged “${result.tag}” yet.`;
+    updateHints();
+    return;
+  }
+  emptyEl.hidden = true;
+
+  const banner = document.createElement("li");
+  banner.className = "tag-filter-banner";
+  const blabel = document.createElement("span");
+  blabel.className = "tag-filter-label";
+  blabel.textContent = `Tagged “${result.tag}”`;
+  const clr = document.createElement("button");
+  clr.className = "tag-filter-clear";
+  clr.textContent = "Clear ✕";
+  clr.addEventListener("click", clearTagFilter);
+  banner.append(blabel, clr);
+  listEl.appendChild(banner);
+
+  if (result.todos.length) {
+    const h = document.createElement("li");
+    h.className = "tag-section";
+    h.textContent = "Todos";
+    listEl.appendChild(h);
+    result.todos.forEach((t) => {
+      const li = document.createElement("li");
+      li.className =
+        "todo-item tag-result" +
+        (t.checked ? " done" : "") +
+        (t.rolled ? " rolled" : "");
+      const date = document.createElement("span");
+      date.className = "tag-result-date";
+      date.textContent = t.date;
+      li.appendChild(date);
+      const label = document.createElement("span");
+      label.className = "label";
+      fillTodoLabel(label, t.text, t.tags);
+      li.appendChild(label);
+      li.addEventListener("click", (e) => {
+        if (e.target.closest(".tag-chip")) return;
+        jumpToDay(t.date);
+      });
+      listEl.appendChild(li);
+    });
+  }
+
+  if (result.ideas.length) {
+    const h = document.createElement("li");
+    h.className = "tag-section";
+    h.textContent = "Ideas";
+    listEl.appendChild(h);
+    result.ideas.forEach((idea) => {
+      const li = document.createElement("li");
+      li.className = "todo-item idea-row tag-result";
+      const em = document.createElement("span");
+      em.className = "idea-emoji";
+      em.textContent = idea.emoji;
+      li.appendChild(em);
+      const label = document.createElement("span");
+      label.className = "label";
+      const txt = document.createElement("span");
+      txt.className = "label-text";
+      txt.textContent = idea.title;
+      label.appendChild(txt);
+      if (idea.tags && idea.tags.length) {
+        const tagRow = document.createElement("span");
+        tagRow.className = "todo-tags";
+        idea.tags.forEach((t) => tagRow.appendChild(makeTagChip(t)));
+        label.appendChild(tagRow);
+      }
+      li.appendChild(label);
+      li.addEventListener("click", () => openIdeaFromFilter(idea.slug));
+      listEl.appendChild(li);
+    });
+  }
+
+  updateHints();
+}
+
+// A modal list of every known tag; picking one opens its filter. Reuses the
+// emoji-picker overlay styling.
+async function showTagPicker() {
+  hideEmojiPicker();
+  await refreshTags();
+  const overlay = document.createElement("div");
+  overlay.className = "emoji-picker-overlay";
+  overlay.addEventListener("click", () => overlay.remove());
+
+  const picker = document.createElement("div");
+  picker.className = "tag-picker";
+  picker.addEventListener("click", (e) => e.stopPropagation());
+
+  const title = document.createElement("div");
+  title.className = "tag-picker-title";
+  title.textContent = "Filter by tag";
+  picker.appendChild(title);
+
+  if (tagCache.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "tag-picker-empty";
+    empty.textContent = "No tags yet — add #hashtags to todos or ideas.";
+    picker.appendChild(empty);
+  } else {
+    const grid = document.createElement("div");
+    grid.className = "tag-picker-grid";
+    sortedTags().forEach((t) => {
+      const b = document.createElement("button");
+      b.className = "tag-chip tag-c" + colorForTag(t);
+      b.textContent = t;
+      b.addEventListener("click", () => {
+        overlay.remove();
+        openTagFilter(t);
+      });
+      grid.appendChild(b);
+    });
+    picker.appendChild(grid);
+  }
+
+  overlay.appendChild(picker);
+  document.body.appendChild(overlay);
+}
+
 async function toggle(index) {
   editingIndex = null;
   pendingDeleteIndex = null;
@@ -1058,13 +1656,15 @@ async function commitEdit(index, value) {
     return;
   }
   render(await invoke("edit_task", { date: current, index, text }));
+  refreshTags();
 }
 
 // --- drag & drop reordering (pointer-based; reliable inside WKWebView) ---
 function onRowPointerDown(e) {
   if (e.button !== 0) return; // left button / primary touch only
-  // Don't start a drag from an interactive control (checkbox / edit / delete).
-  if (e.target.closest("button, input")) return;
+  // Don't start a drag from an interactive control (checkbox / edit / delete)
+  // or from a tag chip (which navigates to the filter view on click).
+  if (e.target.closest("button, input, .tag-chip")) return;
   if (viewIsPast || editingIndex !== null) return;
   dragState = {
     row: e.currentTarget,
@@ -1133,6 +1733,7 @@ async function add() {
     pendingDeleteIndex = null;
     selectedIndex = null;
     renderTodo(await invoke("add_task", { date: current, text }), { kind: "add" });
+    refreshTags();
     inputEl.focus();
   }
   console.log("[ui] add: done");
@@ -1160,11 +1761,23 @@ inputEl.addEventListener("blur", () => {
   updateHints();
 });
 
+attachTagAutocomplete(inputEl);
+
 prevBtn.addEventListener("click", () => goTo(addDays(current, -1), -1));
 nextBtn.addEventListener("click", () => goTo(addDays(current, 1), 1));
 todayBtn.addEventListener("click", goToday);
 
 document.addEventListener("keydown", (e) => {
+  // In the global tag-filter view, Escape clears the filter; other keys are
+  // swallowed so day/list navigation can't act underneath it.
+  if (activeTag) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      clearTagFilter();
+    }
+    return;
+  }
+
   // Option+I: from todo, open ideas. From ideas, no-op (use Option+Menu T).
   if (e.altKey && e.code === "KeyI" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
@@ -1388,4 +2001,5 @@ document.addEventListener("keyup", (e) => {
   }
 });
 
+refreshTags();
 goToday();
