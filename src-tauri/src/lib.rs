@@ -925,11 +925,37 @@ fn get_tag_colors() -> TagColorMap {
 /// `tag` (case-insensitive). Read-only: it never rewrites any file.
 #[tauri::command]
 fn get_tagged(tag: String) -> TaggedResult {
+    get_tagged_multi(vec![tag], false)
+}
+
+/// Returns every todo (across all day files) and every idea matching a set of
+/// tags (case-insensitive). With `match_all` an item must carry *every* tag;
+/// otherwise carrying *any* one of them is enough. Read-only: never rewrites a
+/// file. `result.tag` is the matched tags joined with ", " for display.
+#[tauri::command]
+fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
     let dir = storage_dir();
-    let needle = tag.trim().trim_start_matches('#').trim().to_string();
+    let needles: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().trim_start_matches('#').trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // Whether an item's tags satisfy the query under the current match mode.
+    let matches = |item_tags: &[String]| -> bool {
+        if needles.is_empty() {
+            return false;
+        }
+        let has = |n: &String| item_tags.iter().any(|t| t.eq_ignore_ascii_case(n));
+        if match_all {
+            needles.iter().all(has)
+        } else {
+            needles.iter().any(has)
+        }
+    };
 
     let mut todos: Vec<TaggedTodo> = Vec::new();
-    if !needle.is_empty() {
+    if !needles.is_empty() {
         // Collect matching todos from every todo_YYYYMMDD.txt, newest day first.
         let mut dated: Vec<(NaiveDate, PathBuf)> = Vec::new();
         if let Ok(rd) = fs::read_dir(&dir) {
@@ -948,7 +974,7 @@ fn get_tagged(tag: String) -> TaggedResult {
         dated.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
         for (date, path) in dated {
             for item in read_items(&path) {
-                if item.tags.iter().any(|t| t.eq_ignore_ascii_case(&needle)) {
+                if matches(&item.tags) {
                     todos.push(TaggedTodo {
                         date: date.format("%Y-%m-%d").to_string(),
                         checked: item.checked,
@@ -961,16 +987,16 @@ fn get_tagged(tag: String) -> TaggedResult {
         }
     }
 
-    let ideas: Vec<IdeaListEntry> = if needle.is_empty() {
+    let ideas: Vec<IdeaListEntry> = if needles.is_empty() {
         Vec::new()
     } else {
         read_ideas_index(&dir)
             .into_iter()
-            .filter(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case(&needle)))
+            .filter(|e| matches(&e.tags))
             .collect()
     };
 
-    TaggedResult { tag: needle, todos, ideas }
+    TaggedResult { tag: needles.join(", "), todos, ideas }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -992,6 +1018,7 @@ pub fn run() {
             delete_idea,
             get_tags,
             get_tagged,
+            get_tagged_multi,
             get_tag_colors
         ])
         .run(tauri::generate_context!())

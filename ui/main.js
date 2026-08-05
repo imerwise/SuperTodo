@@ -88,7 +88,11 @@ let pendingDeleteIndex = null; // row showing inline delete confirmation, or nul
 
 // Tag state.
 let tagCache = []; // all known tags (from get_tags), for autocomplete
-let activeTag = null; // when set, the app shows the results for one tag
+let activeTag = null; // truthy when the results view is open (display label)
+let activeTags = []; // the tag names currently driving the results view
+let tagMatchAll = false; // results view: false = match ANY (OR), true = match ALL (AND)
+let selectedTags = []; // Tags view: the tags checked for multi-select
+let tagResultRows = []; // results view: one entry per selectable row, in DOM order
 let tagListView = false; // when true, the app shows the browsable Tags view
 let filterCameFromList = false; // whether the active results were opened from the Tags view
 let tagFilterReturn = null; // { mode, current } to restore when the whole tag flow exits
@@ -1265,21 +1269,24 @@ function updateHints(force = null) {
 
   // Tags view hints
   if (tagListView) {
-    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+    const pairs = [
       ["↑↓", "Move"],
-      ["⏎", "Filter"],
-      ["Esc", "Back"],
-    ])}</span>`;
+      ["Space", "Select"],
+      ["⏎", selectedTags.length ? `Show ${selectedTags.length}` : "Filter"],
+      ["Esc", selectedTags.length ? "Clear" : "Back"],
+    ];
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML(pairs)}</span>`;
     measureHintTicker();
     return;
   }
 
   // Tag results view hints
   if (activeTag) {
-    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
-      ["⏎/Click", "Open"],
-      ["Esc", filterCameFromList ? "Back to tags" : "Clear filter"],
-    ])}</span>`;
+    const pairs = [];
+    if (tagResultRows.length) pairs.push(["↑↓", "Move"], ["⏎", "Open"]);
+    if (activeTags.length > 1) pairs.push(["Tab", tagMatchAll ? "Any" : "All"]);
+    pairs.push(["Esc", filterCameFromList ? "Back to tags" : "Clear filter"]);
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML(pairs)}</span>`;
     measureHintTicker();
     return;
   }
@@ -1475,22 +1482,48 @@ async function openTagList() {
   renderTagList();
 }
 
-// Show every todo (any day) and idea carrying `tag`. Selecting a tag from the
-// Tags view routes here; clicking a chip anywhere does too.
+// Show every todo (any day) and idea carrying `tag`. Clicking a chip anywhere
+// routes here — a single-tag shortcut into the multi-tag results view.
 async function openTagFilter(tag) {
   if (!tag) return;
+  openTaggedResults([tag], false);
+}
+
+// Open the results view for a set of tags. `matchAll` picks the combine mode
+// (ANY vs ALL); the results view lets the user flip it afterwards.
+async function openTaggedResults(tags, matchAll) {
+  const list = (tags || []).filter(Boolean);
+  if (!list.length) return;
   hideEmojiPicker();
   if (!tagFilterReturn) tagFilterReturn = { mode, current };
   filterCameFromList = tagListView;
   tagListView = false;
-  activeTag = tag;
+  activeTags = list;
+  tagMatchAll = !!matchAll;
+  activeTag = list.length === 1 ? list[0] : `${list.length} tags`;
   editingIndex = null;
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
   inputEl.blur();
-  const result = await invoke("get_tagged", { tag });
+  await refetchTagged();
+}
+
+// Re-run the current results query and re-render — used on open and whenever the
+// ANY/ALL toggle changes.
+async function refetchTagged() {
+  const result = await invoke("get_tagged_multi", {
+    tags: activeTags,
+    matchAll: tagMatchAll,
+  });
   renderTagFilter(result);
+}
+
+// Flip the results view between matching ANY and ALL of the active tags.
+function setTagMatchAll(all) {
+  if (tagMatchAll === all) return;
+  tagMatchAll = all;
+  refetchTagged();
 }
 
 // Back out of the results view: to the Tags view if that's where we came from,
@@ -1512,6 +1545,8 @@ function exitTagView() {
 function exitTagFlow() {
   const ret = tagFilterReturn || { mode: "todo", current: null };
   activeTag = null;
+  activeTags = [];
+  selectedTags = [];
   tagListView = false;
   filterCameFromList = false;
   tagFilterReturn = null;
@@ -1529,6 +1564,8 @@ function exitTagFlow() {
 // Leave the tag flow and open a specific day / idea from a result row.
 function jumpToDay(date) {
   activeTag = null;
+  activeTags = [];
+  selectedTags = [];
   tagListView = false;
   filterCameFromList = false;
   tagFilterReturn = null;
@@ -1540,6 +1577,8 @@ function jumpToDay(date) {
 
 async function openIdeaFromFilter(slug) {
   activeTag = null;
+  activeTags = [];
+  selectedTags = [];
   tagListView = false;
   filterCameFromList = false;
   tagFilterReturn = null;
@@ -1551,8 +1590,28 @@ async function openIdeaFromFilter(slug) {
   renderIdeaDetail(slug);
 }
 
-// The browsable Tags view: one selectable row per tag (alphabetical). Enter or
-// click opens that tag's results.
+// Whether `tag` is in the multi-select set (case-insensitive).
+function isTagSelected(tag) {
+  return selectedTags.some((t) => t.toLowerCase() === tag.toLowerCase());
+}
+
+// Add or remove `tag` from the multi-select set, then re-render the Tags view.
+function toggleTagSelection(tag) {
+  const i = selectedTags.findIndex((t) => t.toLowerCase() === tag.toLowerCase());
+  if (i >= 0) selectedTags.splice(i, 1);
+  else selectedTags.push(tag);
+  renderTagList();
+}
+
+// Open the results view for whatever tags are currently checked.
+function showSelectedTags() {
+  if (selectedTags.length) openTaggedResults(selectedTags, tagMatchAll);
+}
+
+// The browsable Tags view: one checkable row per tag (alphabetical). A row's
+// checkbox toggles it into the multi-select set; clicking the chip filters by
+// that one tag immediately. Enter shows the selected set (or the cursor row if
+// nothing is checked).
 function renderTagList() {
   weekdayEl.textContent = "";
   dateEl.textContent = "Tags";
@@ -1566,12 +1625,45 @@ function renderTagList() {
   const tags = sortedTags();
   if (tags.length === 0) {
     selectedIndex = null;
+    selectedTags = [];
     emptyEl.hidden = false;
     emptyEl.textContent = "No tags yet — add #hashtags to todos or ideas.";
     updateHints();
     return;
   }
   emptyEl.hidden = true;
+
+  // Drop any checked tags that no longer exist (e.g. after an edit).
+  selectedTags = selectedTags.filter((t) =>
+    tags.some((x) => x.toLowerCase() === t.toLowerCase())
+  );
+
+  // Action bar (always shown): the selection count plus Clear and Show results.
+  // With nothing checked both buttons are disabled and the count reads "0".
+  const has = selectedTags.length > 0;
+  const bar = document.createElement("li");
+  bar.className = "tag-select-bar";
+  const count = document.createElement("span");
+  count.className = "tag-select-count";
+  count.textContent = `${selectedTags.length} selected`;
+  const actions = document.createElement("span");
+  actions.className = "tag-select-actions";
+  const clear = document.createElement("button");
+  clear.className = "tag-filter-clear";
+  clear.textContent = "Clear";
+  clear.disabled = !has;
+  clear.addEventListener("click", () => {
+    selectedTags = [];
+    renderTagList();
+  });
+  const show = document.createElement("button");
+  show.className = "tag-select-show";
+  show.textContent = `Show results ›`;
+  show.disabled = !has;
+  show.addEventListener("click", showSelectedTags);
+  actions.append(clear, show);
+  bar.append(count, actions);
+  listEl.appendChild(bar);
 
   if (selectedIndex === null) selectedIndex = 0;
   else if (selectedIndex >= tags.length) selectedIndex = tags.length - 1;
@@ -1581,13 +1673,28 @@ function renderTagList() {
     li.className = "todo-item tag-list-row";
     li.dataset.index = index;
     if (index === selectedIndex) li.classList.add("selected");
+
+    const box = document.createElement("span");
+    box.className = "tag-check" + (isTagSelected(t) ? " on" : "");
+    box.setAttribute("aria-hidden", "true");
+    li.appendChild(box);
+
     const chip = document.createElement("span");
     chip.className = "tag-chip tag-c" + colorForTag(t);
     chip.textContent = t;
+    chip.title = "Filter by " + t;
     li.appendChild(chip);
-    li.addEventListener("click", () => {
+
+    // The chip is a shortcut to filter by this one tag; the rest of the row
+    // (and its checkbox) toggles multi-select membership.
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
       selectedIndex = index;
       openTagFilter(t);
+    });
+    li.addEventListener("click", () => {
+      selectedIndex = index;
+      toggleTagSelection(t);
     });
     listEl.appendChild(li);
   });
@@ -1602,6 +1709,8 @@ function openSettings() {
   settingsReturn = { mode, current };
   settingsView = true;
   activeTag = null;
+  activeTags = [];
+  selectedTags = [];
   tagListView = false;
   editingIndex = null;
   pendingDeleteIndex = null;
@@ -1677,34 +1786,64 @@ function renderSettings() {
 
 function renderTagFilter(result) {
   weekdayEl.textContent = "";
-  dateEl.textContent = result.tag;
+  dateEl.textContent = activeTags.length > 1 ? `${activeTags.length} tags` : result.tag;
   modeIndicatorEl.hidden = true;
   todayBtn.hidden = true;
   prevBtn.style.display = "none";
   nextBtn.style.display = "none";
   composerEl.style.display = "none";
+  emptyEl.hidden = true;
   listEl.innerHTML = "";
 
-  const total = result.todos.length + result.ideas.length;
-  if (total === 0) {
-    emptyEl.hidden = false;
-    emptyEl.textContent = `Nothing tagged “${result.tag}” yet.`;
-    updateHints();
-    return;
-  }
-  emptyEl.hidden = true;
+  const multi = activeTags.length > 1;
 
+  // Banner: what's being matched + (for multi-tag) an ANY/ALL switch + back.
   const banner = document.createElement("li");
   banner.className = "tag-filter-banner";
   const blabel = document.createElement("span");
   blabel.className = "tag-filter-label";
-  blabel.textContent = `Tagged “${result.tag}”`;
+  blabel.textContent = multi
+    ? `${tagMatchAll ? "All of" : "Any of"} ${activeTags.join(", ")}`
+    : `Tagged “${result.tag}”`;
+  banner.appendChild(blabel);
+
+  if (multi) {
+    const seg = document.createElement("span");
+    seg.className = "settings-seg tag-match-seg";
+    const mk = (label, all) => {
+      const b = document.createElement("button");
+      b.className = "seg-btn" + (tagMatchAll === all ? " active" : "");
+      b.textContent = label;
+      b.addEventListener("click", () => setTagMatchAll(all));
+      return b;
+    };
+    seg.append(mk("Any", false), mk("All", true));
+    banner.appendChild(seg);
+  }
+
   const clr = document.createElement("button");
   clr.className = "tag-filter-clear";
   clr.textContent = filterCameFromList ? "‹ Tags" : "Clear ✕";
   clr.addEventListener("click", clearTagFilter);
-  banner.append(blabel, clr);
+  banner.appendChild(clr);
   listEl.appendChild(banner);
+
+  // Rebuild the row map (one entry per selectable result, in DOM order) so the
+  // keyboard cursor and Enter know what each row opens.
+  tagResultRows = [];
+
+  const total = result.todos.length + result.ideas.length;
+  if (total === 0) {
+    selectedIndex = null;
+    const empty = document.createElement("li");
+    empty.className = "tag-empty";
+    empty.textContent = multi
+      ? `Nothing matches ${tagMatchAll ? "all" : "any"} of these tags.`
+      : `Nothing tagged “${result.tag}” yet.`;
+    listEl.appendChild(empty);
+    updateHints();
+    return;
+  }
 
   if (result.todos.length) {
     const h = document.createElement("li");
@@ -1712,11 +1851,14 @@ function renderTagFilter(result) {
     h.textContent = "Todos";
     listEl.appendChild(h);
     result.todos.forEach((t) => {
+      const index = tagResultRows.length;
+      tagResultRows.push({ kind: "day", date: t.date });
       const li = document.createElement("li");
       li.className =
         "todo-item tag-result" +
         (t.checked ? " done" : "") +
         (t.rolled ? " rolled" : "");
+      li.dataset.index = index;
       const date = document.createElement("span");
       date.className = "tag-result-date";
       date.textContent = t.date;
@@ -1727,7 +1869,7 @@ function renderTagFilter(result) {
       li.appendChild(label);
       li.addEventListener("click", (e) => {
         if (e.target.closest(".tag-chip")) return;
-        jumpToDay(t.date);
+        openTagResult(index);
       });
       listEl.appendChild(li);
     });
@@ -1739,8 +1881,11 @@ function renderTagFilter(result) {
     h.textContent = "Ideas";
     listEl.appendChild(h);
     result.ideas.forEach((idea) => {
+      const index = tagResultRows.length;
+      tagResultRows.push({ kind: "idea", slug: idea.slug });
       const li = document.createElement("li");
       li.className = "todo-item idea-row tag-result";
+      li.dataset.index = index;
       const em = document.createElement("span");
       em.className = "idea-emoji";
       em.textContent = idea.emoji;
@@ -1753,12 +1898,29 @@ function renderTagFilter(result) {
       label.appendChild(txt);
       appendTagChips(label, idea.tags);
       li.appendChild(label);
-      li.addEventListener("click", () => openIdeaFromFilter(idea.slug));
+      li.addEventListener("click", (e) => {
+        if (e.target.closest(".tag-chip")) return;
+        openTagResult(index);
+      });
       listEl.appendChild(li);
     });
   }
 
+  // Keep the cursor in range across re-renders (e.g. flipping Any/All).
+  if (selectedIndex === null) selectedIndex = 0;
+  else if (selectedIndex >= tagResultRows.length)
+    selectedIndex = tagResultRows.length - 1;
+  applySelection();
+
   updateHints();
+}
+
+// Open the result row at `index` — a day for a todo, the detail for an idea.
+function openTagResult(index) {
+  const row = tagResultRows[index];
+  if (!row) return;
+  if (row.kind === "idea") openIdeaFromFilter(row.slug);
+  else jumpToDay(row.date);
 }
 
 async function toggle(index) {
@@ -1961,14 +2123,53 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // The browsable Tags view: arrows move the cursor, Enter opens the selected
-  // tag's results, Escape leaves the tag flow. Everything else is swallowed.
+  // The browsable Tags view: arrows move the cursor, Space checks/unchecks the
+  // cursor tag for multi-select, Enter shows the checked set (or the cursor tag
+  // if none are checked). Escape clears the selection if any tags are checked,
+  // otherwise leaves the tag flow. Everything else swallowed.
   if (tagListView) {
     const items = sortedTags();
     const n = items.length;
     if (e.key === "Escape") {
       e.preventDefault();
-      exitTagView();
+      if (selectedTags.length) {
+        selectedTags = [];
+        renderTagList();
+      } else {
+        exitTagView();
+      }
+    } else if (n > 0 && e.key === "ArrowDown") {
+      e.preventDefault();
+      selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
+      applySelection();
+    } else if (n > 0 && e.key === "ArrowUp") {
+      e.preventDefault();
+      selectedIndex =
+        selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
+      applySelection();
+    } else if (n > 0 && e.key === " " && selectedIndex !== null) {
+      e.preventDefault();
+      toggleTagSelection(items[selectedIndex]);
+    } else if (n > 0 && e.key === "Enter") {
+      e.preventDefault();
+      if (selectedTags.length) showSelectedTags();
+      else if (selectedIndex !== null) openTagFilter(items[selectedIndex]);
+    }
+    return;
+  }
+
+  // The tag results view: arrows move the cursor over result rows, Enter opens
+  // the selected one, Escape backs out (to the Tags view or the origin), Tab
+  // flips a multi-tag query between ANY and ALL. Other keys are swallowed so
+  // nothing navigates underneath it.
+  if (activeTag) {
+    const n = tagResultRows.length;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      clearTagFilter();
+    } else if (e.key === "Tab" && activeTags.length > 1) {
+      e.preventDefault();
+      setTagMatchAll(!tagMatchAll);
     } else if (n > 0 && e.key === "ArrowDown") {
       e.preventDefault();
       selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
@@ -1980,17 +2181,7 @@ document.addEventListener("keydown", (e) => {
       applySelection();
     } else if (n > 0 && e.key === "Enter" && selectedIndex !== null) {
       e.preventDefault();
-      openTagFilter(items[selectedIndex]);
-    }
-    return;
-  }
-
-  // The tag results view: Escape backs out (to the Tags view or the origin);
-  // other keys are swallowed so nothing navigates underneath it.
-  if (activeTag) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      clearTagFilter();
+      openTagResult(selectedIndex);
     }
     return;
   }

@@ -1248,6 +1248,108 @@ body.composing .content {
   cursor: pointer;
 }
 
+/* Multi-select checkbox at the head of each Tags-view row. */
+.tag-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--line);
+  border-radius: 5px;
+  background: var(--card);
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.tag-list-row:hover .tag-check {
+  border-color: var(--accent);
+}
+
+.tag-check.on {
+  border-color: var(--accent);
+  background: var(--accent);
+  position: relative;
+}
+
+.tag-check.on::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Action bar shown once one or more tags are checked. */
+.tag-select-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tag-select-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.tag-select-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.tag-select-show {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.tag-select-show:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.tag-select-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  filter: none;
+}
+
+.tag-select-bar .tag-filter-clear:disabled:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+/* ANY/ALL switch inside the results banner. Sits between the label and the
+   back/clear button (the banner is a space-between flex row). */
+.tag-match-seg {
+  margin-left: auto;
+  margin-right: 10px;
+}
+
+/* The banner already space-between's its children; with the seg present, let the
+   label take its natural width and the seg's auto-margin do the spacing. */
+.tag-filter-banner {
+  gap: 8px;
+}
+
+/* Empty-state row inside the results view (keeps the banner + toggle visible). */
+.tag-empty {
+  padding: 20px 4px;
+  color: var(--muted);
+  font-size: 13px;
+  border-bottom: none;
+}
+
 /* --- Settings view ------------------------------------------------------ */
 .settings-row {
   display: flex;
