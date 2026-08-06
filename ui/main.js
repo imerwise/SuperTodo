@@ -153,6 +153,14 @@ function addDays(iso, n) {
   return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
 }
 
+// Whole days from ISO date `a` to ISO date `b` (b - a); negative if b precedes a.
+function daysBetween(a, b) {
+  const [ay, am, ad] = a.split("-").map(Number);
+  const [by, bm, bd] = b.split("-").map(Number);
+  const ms = new Date(by, bm - 1, bd) - new Date(ay, am - 1, ad);
+  return Math.round(ms / 86400000);
+}
+
 // --- hashtags -------------------------------------------------------------
 
 // Number of chip colors; tag N (by creation order) uses color ((N-1) % this) + 1.
@@ -473,10 +481,15 @@ function renderTodo(data, fx = null) {
         badge.textContent = "moved on";
         li.appendChild(badge);
       } else if (item.carried) {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = "carried over";
-        li.appendChild(badge);
+        // How many days the task is late: viewed day − creation day. Plain text.
+        const age = item.created ? daysBetween(item.created, data.date) : 0;
+        if (age > 0) {
+          const note = document.createElement("span");
+          note.className = "carry-late";
+          note.textContent = age === 1 ? "1 day late" : `${age} days late`;
+          note.title = item.created ? `Created ${item.created}` : "";
+          li.appendChild(note);
+        }
       }
 
       if (!data.is_past && pendingDeleteIndex === index) {
