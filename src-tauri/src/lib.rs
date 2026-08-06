@@ -1015,7 +1015,8 @@ fn delete_idea(slug: String) -> Vec<IdeaListEntry> {
 /// show and navigate to it.
 #[derive(Serialize)]
 struct TaggedTodo {
-    date: String, // YYYY-MM-DD
+    date: String,  // YYYY-MM-DD
+    index: usize,  // position within its day, so the UI can open its detail
     checked: bool,
     rolled: bool,
     text: String,
@@ -1164,10 +1165,11 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
         let mut dates = all_todo_dates(&dir);
         dates.sort_by_key(|date| std::cmp::Reverse(*date));
         for date in dates {
-            for item in load_day_items(&dir, date) {
+            for (index, item) in load_day_items(&dir, date).into_iter().enumerate() {
                 if matches(&item.tags) {
                     todos.push(TaggedTodo {
                         date: date.format("%Y-%m-%d").to_string(),
+                        index,
                         checked: item.checked,
                         rolled: item.rolled,
                         text: item.text,

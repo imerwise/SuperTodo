@@ -139,7 +139,9 @@ let ideas = []; // list of IdeaListEntry
 let ideaDetailSlug = null; // slug of idea being viewed in detail, or null
 let ideaDetailSourceIndex = null; // index in ideas[] when entering detail, for re-selecting on back
 let ideaDetailDirty = false; // whether detail has unsaved changes
+let ideaDetailReturn = null; // filter context to restore if the detail was opened from a tag view
 let todoDetailIndex = null; // index of the todo shown in its detail view, or null
+let todoDetailReturn = null; // filter context to restore if the detail was opened from a tag view
 let emojiPickerTarget = null; // { slug, callback } for the active picker
 
 // --- date helpers (local, no timezone drift) ---
@@ -385,6 +387,7 @@ function renderTodo(data, fx = null) {
   current = data.date;
   viewIsPast = data.is_past;
   todoDetailIndex = null; // rendering the list means we're out of the detail view
+  todoDetailReturn = null;
 
   weekdayEl.textContent = data.weekday;
   dateEl.textContent = data.pretty;
@@ -540,6 +543,7 @@ function renderTodoDetail(index) {
   const date = lastData.date;
   const item = lastData.items[index];
   todoDetailIndex = index;
+  todoDetailReturn = null; // opened normally; a filter-open sets this afterwards
   pendingDeleteIndex = null;
   editingIndex = null;
 
@@ -643,9 +647,22 @@ async function saveAndGoBackTodo(date, index, titleInput, textarea, item) {
   closeTodoDetail(index);
 }
 
-// Leave the todo detail and re-render the day list, keeping the row selected.
+// Leave the todo detail. If it was opened from a tag view, reopen that filter
+// with its results; otherwise re-render the day list, keeping the row selected.
 function closeTodoDetail(index) {
   todoDetailIndex = null;
+  if (todoDetailReturn) {
+    const r = todoDetailReturn;
+    todoDetailReturn = null;
+    tagFilterReturn = r.filterReturn; // set before openTaggedResults so it's kept
+    openTaggedResults(r.tags, r.matchAll).then(() => {
+      // openTaggedResults derives this from tagListView (false here); restore it
+      // so backing out of the results returns to the right place.
+      filterCameFromList = r.cameFromList;
+      selectedTags = r.selected; // keep the multi-select checks for the Tags view
+    });
+    return;
+  }
   if (typeof index === "number") selectedIndex = index;
   renderTodo(lastData);
 }
@@ -656,6 +673,7 @@ function renderIdeas(data) {
   console.log("[ui] renderIdeas: data.length=", data.length, "ideaDetailSlug=", ideaDetailSlug);
   ideas = data;
   ideaDetailSlug = null;
+  ideaDetailReturn = null;
   editingIndex = null;
 
   // Show ideas header
@@ -767,6 +785,10 @@ function renderIdeas(data) {
 function renderIdeaDetail(slug) {
   console.log("[ui] renderIdeaDetail: slug=", slug);
   ideaDetailSlug = slug;
+  // NB: ideaDetailReturn is deliberately NOT cleared here — the detail re-renders
+  // itself on emoji/title edits (re-slug), and that must not drop a filter
+  // return. It's cleared instead when a fresh, non-filter detail is opened
+  // (renderIdeas / addIdea) and set by openIdeaFromFilter.
   ideaDetailSourceIndex = selectedIndex;
   ideaDetailDirty = false;
   pendingDeleteIndex = null;
@@ -867,6 +889,10 @@ function renderIdeaDetail(slug) {
     textarea.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        // Stop the global idea-detail Esc handler from also firing — otherwise
+        // exitIdeaDetail runs twice and the second call, with the filter return
+        // already consumed, falls back to the ideas list / home.
+        e.stopPropagation();
         saveAndGoBack(idea.slug, titleInput, textarea, idea);
       }
     });
@@ -1165,6 +1191,7 @@ async function addIdea(text) {
   const newIndex = ideas.findIndex(e => e.slug === result.new_slug);
   selectedIndex = newIndex >= 0 ? newIndex : 0;
   console.log("[ui] addIdea: got", ideas.length, "ideas, new_slug=", result.new_slug, "newIndex=", selectedIndex);
+  ideaDetailReturn = null; // a freshly added idea is never a filter return
   renderIdeaDetail(result.new_slug);
   console.log("[ui] addIdea: done");
 }
@@ -1216,7 +1243,7 @@ async function saveAndGoBack(slug, titleInput, textarea, originalIdea) {
     promises.push(editIdea(slug, null, null, newDesc));
   }
   await Promise.all(promises);
-  switchMode("ideas");
+  exitIdeaDetail();
 }
 
 // --- mode switching -------------------------------------------------------
@@ -1230,7 +1257,9 @@ async function switchMode(newMode) {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  ideaDetailReturn = null;
   todoDetailIndex = null;
+  todoDetailReturn = null;
   inputEl.blur();
 
   // If coming back from idea detail, re-select the source idea
@@ -1491,7 +1520,7 @@ function updateHints(force = null) {
       pairs = [
         ["↑↓", "Move"],
         ["Space", "Done"],
-        ["⏎", "Edit"],
+        ["⏎", "Open"],
         ["⇧↑↓", "Reorder"],
         ["⌫", "Delete"],
         ["←→", "Day"],
@@ -1716,6 +1745,14 @@ function jumpToDay(date) {
 }
 
 async function openIdeaFromFilter(slug) {
+  // Remember the filter so Esc from the detail can return to these results.
+  const ret = {
+    tags: activeTags.slice(),
+    matchAll: tagMatchAll,
+    cameFromList: filterCameFromList,
+    selected: selectedTags.slice(),
+    filterReturn: tagFilterReturn,
+  };
   activeTag = null;
   activeTags = [];
   selectedTags = [];
@@ -1728,6 +1765,61 @@ async function openIdeaFromFilter(slug) {
   inputEl.placeholder = "Add an idea…";
   ideas = await invoke("get_ideas");
   renderIdeaDetail(slug);
+  ideaDetailReturn = ret; // mark this detail as opened from the filter
+}
+
+// Leave the idea detail. If it was opened from a tag view, reopen that filter
+// with its results; otherwise return to the ideas list.
+function exitIdeaDetail() {
+  if (ideaDetailReturn) {
+    const r = ideaDetailReturn;
+    ideaDetailReturn = null;
+    ideaDetailSlug = null;
+    tagFilterReturn = r.filterReturn; // set before openTaggedResults so it's kept
+    openTaggedResults(r.tags, r.matchAll).then(() => {
+      filterCameFromList = r.cameFromList;
+      selectedTags = r.selected; // keep the multi-select checks for the Tags view
+    });
+    return;
+  }
+  switchMode("ideas");
+}
+
+// Leave the tag flow and open a specific task's detail view — the todo
+// counterpart to openIdeaFromFilter.
+async function openTodoFromFilter(date, todoIndex) {
+  // Remember the filter so Esc from the detail can return to these results.
+  const ret = {
+    tags: activeTags.slice(),
+    matchAll: tagMatchAll,
+    cameFromList: filterCameFromList,
+    selected: selectedTags.slice(),
+    filterReturn: tagFilterReturn,
+  };
+  activeTag = null;
+  activeTags = [];
+  selectedTags = [];
+  tagListView = false;
+  filterCameFromList = false;
+  tagFilterReturn = null;
+  mode = "todo";
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  prevBtn.style.display = "";
+  nextBtn.style.display = "";
+  inputEl.placeholder = "Add a task…";
+  const data = await invoke("get_day", { date });
+  lastData = data;
+  current = data.date;
+  viewIsPast = data.is_past;
+  if (todoIndex >= 0 && todoIndex < data.items.length) {
+    selectedIndex = todoIndex;
+    renderTodoDetail(todoIndex); // clears todoDetailReturn…
+    todoDetailReturn = ret; // …so set it right after
+  } else {
+    // The task moved/was removed since the results were built — just show the day.
+    render(data);
+  }
 }
 
 // Whether `tag` is in the multi-select set (case-insensitive).
@@ -2208,7 +2300,7 @@ function renderTagFilter(result) {
     listEl.appendChild(h);
     result.todos.forEach((t) => {
       const index = tagResultRows.length;
-      tagResultRows.push({ kind: "day", date: t.date });
+      tagResultRows.push({ kind: "todo", date: t.date, todoIndex: t.index });
       const li = document.createElement("li");
       li.className =
         "todo-item tag-result" +
@@ -2271,12 +2363,13 @@ function renderTagFilter(result) {
   updateHints();
 }
 
-// Open the result row at `index` — a day for a todo, the detail for an idea.
+// Open the result row at `index` — the task's detail for a todo, the idea's
+// detail for an idea (both mirror opening from their own list).
 function openTagResult(index) {
   const row = tagResultRows[index];
   if (!row) return;
   if (row.kind === "idea") openIdeaFromFilter(row.slug);
-  else jumpToDay(row.date);
+  else openTodoFromFilter(row.date, row.todoIndex);
 }
 
 async function toggle(index) {
@@ -2608,7 +2701,7 @@ document.addEventListener("keydown", (e) => {
       const args = { slug };
       if (title) args.title = title;
       if (desc) args.description = desc;
-      invoke("edit_idea", args).then(() => switchMode("ideas"));
+      invoke("edit_idea", args).then(() => exitIdeaDetail());
     }
     return;
   }
