@@ -2403,13 +2403,20 @@ async function add() {
     inputEl.value = "";
     editingIndex = null;
     pendingDeleteIndex = null;
-    selectedIndex = null;
     const data = await invoke("add_task", { date: current, text });
-    // Refresh colors before rendering so a brand-new tag's chip is right the
-    // first time (its ledger slot must exist before colorForTag runs).
     await refreshTags();
-    renderTodo(data, { kind: "add" });
-    inputEl.focus();
+    // Like adding an idea: open the new task's detail view so its description
+    // and tags can be filled in right away. The new task is appended last.
+    lastData = data;
+    current = data.date;
+    viewIsPast = data.is_past;
+    const newIndex = data.items.length - 1;
+    selectedIndex = newIndex;
+    if (newIndex >= 0) {
+      renderTodoDetail(newIndex);
+    } else {
+      renderTodo(data, { kind: "add" });
+    }
   }
   console.log("[ui] add: done");
 }
