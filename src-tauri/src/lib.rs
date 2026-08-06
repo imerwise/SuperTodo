@@ -4,21 +4,22 @@ use std::fs;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// Storage: one structured JSON file per day, todo_YYYYMMDD.json, holding an
-// array of tasks (text/description/tags/created + checked/carried/rolled flags).
+// Storage: one structured JSON file per day, todos/todo_YYYYMMDD.json, holding
+// an array of tasks (text/description/tags/created + checked/carried/rolled).
+// Day-files live in a todos/ subfolder, mirroring ideas/, so the storage root
+// stays tidy (todos/, ideas/, tags.json).
 //
-// Legacy plain-text files (todo_YYYYMMDD.txt) from earlier versions are still
-// read: the first time a day is loaded without a .json, its .txt is migrated
-// (inline "#tags" extracted into structured tags, title cleaned, created set to
-// the file's date) and a .json is written. The old .txt is left in place as a
-// read-only source and is not kept in sync afterwards.
+// Older layouts are relocated into todos/ on first read: a pre-todos-folder
+// top-level todo_*.json is moved as-is, and a legacy plain-text todo_*.txt
+// (from either location) is migrated — inline "#tags" extracted into structured
+// tags, the title cleaned, created set to the file's date — then written as JSON.
 //
 //   Legacy line format:
 //     [ ] Task     -> not done      [x] Task -> done
 //     [>] Task     -> rolled over to a later day (stays in the old file)
 //     [ ] ↪ Task   -> carried over from a previous day
 //
-// Files live in ~/Documents/SuperTodo/ (or the folder chosen in Settings).
+// The storage root is ~/Documents/SuperTodo/ (or the folder chosen in Settings).
 // ---------------------------------------------------------------------------
 
 const CARRY_MARK: char = '\u{21AA}'; // ↪
@@ -157,14 +158,30 @@ fn storage_dir() -> PathBuf {
     dir
 }
 
-/// The structured JSON day-file path (current format).
+/// The todos subfolder (created on demand), where day-files live — mirroring the
+/// ideas folder. Keeps the storage root tidy: just todos/, ideas/ and tags.json.
+fn todos_dir(dir: &PathBuf) -> PathBuf {
+    let todos = dir.join("todos");
+    let _ = fs::create_dir_all(&todos);
+    todos
+}
+
+/// The canonical structured day-file: <dir>/todos/todo_YYYYMMDD.json
 fn json_file_for(dir: &PathBuf, date: NaiveDate) -> PathBuf {
+    todos_dir(dir).join(format!("todo_{}.json", date.format("%Y%m%d")))
+}
+
+/// A pre-todos-folder JSON day-file at the storage root — a read-only source that
+/// load_day_items relocates into the todos folder.
+fn legacy_json_file_for(dir: &PathBuf, date: NaiveDate) -> PathBuf {
     dir.join(format!("todo_{}.json", date.format("%Y%m%d")))
 }
 
-/// The legacy plain-text day-file path (migration source only).
-fn file_for(dir: &PathBuf, date: NaiveDate) -> PathBuf {
-    dir.join(format!("todo_{}.txt", date.format("%Y%m%d")))
+/// Legacy plain-text day-files to migrate from, newest layout first: inside the
+/// todos folder, then the old storage root.
+fn txt_candidates(dir: &PathBuf, date: NaiveDate) -> [PathBuf; 2] {
+    let name = format!("todo_{}.txt", date.format("%Y%m%d"));
+    [todos_dir(dir).join(&name), dir.join(name)]
 }
 
 // --- parsing / writing -----------------------------------------------------
@@ -296,24 +313,38 @@ fn migrate_txt_items(path: &PathBuf, iso_date: &str) -> Vec<TodoItem> {
         .collect()
 }
 
-/// Whether any day-file (JSON or legacy .txt) exists for `date`.
+/// Whether any day-file exists for `date` — the canonical todos-folder JSON, a
+/// legacy top-level JSON, or a legacy .txt in either location.
 fn day_exists(dir: &PathBuf, date: NaiveDate) -> bool {
-    json_file_for(dir, date).exists() || file_for(dir, date).exists()
+    json_file_for(dir, date).exists()
+        || legacy_json_file_for(dir, date).exists()
+        || txt_candidates(dir, date).iter().any(|p| p.exists())
 }
 
-/// Loads a day's tasks. Prefers the JSON file; if only a legacy .txt exists it
-/// is migrated once (the .json is written) and the migrated items returned.
+/// Loads a day's tasks, relocating older layouts into the todos folder on first
+/// touch: the canonical JSON is used as-is; a pre-todos-folder top-level JSON is
+/// moved into todos/; a legacy .txt (either location) is migrated to JSON.
 fn load_day_items(dir: &PathBuf, date: NaiveDate) -> Vec<TodoItem> {
     let json_path = json_file_for(dir, date);
     if json_path.exists() {
         return read_items_json(&json_path);
     }
-    let txt_path = file_for(dir, date);
-    if txt_path.exists() {
-        let iso = date.format("%Y-%m-%d").to_string();
-        let items = migrate_txt_items(&txt_path, &iso);
+    // Relocate a top-level JSON from before the todos folder existed.
+    let legacy_json = legacy_json_file_for(dir, date);
+    if legacy_json.exists() {
+        let items = read_items_json(&legacy_json);
         write_day_items(dir, date, &items);
+        let _ = fs::remove_file(&legacy_json);
         return items;
+    }
+    // Migrate a plain-text day-file (todos folder or storage root) into JSON.
+    for txt in txt_candidates(dir, date) {
+        if txt.exists() {
+            let iso = date.format("%Y-%m-%d").to_string();
+            let items = migrate_txt_items(&txt, &iso);
+            write_day_items(dir, date, &items);
+            return items;
+        }
     }
     Vec::new()
 }
@@ -326,19 +357,22 @@ fn write_day_items(dir: &PathBuf, date: NaiveDate, items: &[TodoItem]) {
     }
 }
 
-/// Every date that has a day-file (JSON or legacy .txt), deduped.
+/// Every date that has a day-file, deduped — scanning both the todos folder
+/// (canonical) and the storage root (legacy layouts still awaiting relocation).
 fn all_todo_dates(dir: &PathBuf) -> Vec<NaiveDate> {
     use std::collections::BTreeSet;
     let mut dates: BTreeSet<NaiveDate> = BTreeSet::new();
-    if let Ok(rd) = fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let digits = name
-                .strip_prefix("todo_")
-                .and_then(|s| s.strip_suffix(".json").or_else(|| s.strip_suffix(".txt")));
-            if let Some(d) = digits {
-                if let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") {
-                    dates.insert(date);
+    for scan in [todos_dir(dir), dir.clone()] {
+        if let Ok(rd) = fs::read_dir(&scan) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let digits = name
+                    .strip_prefix("todo_")
+                    .and_then(|s| s.strip_suffix(".json").or_else(|| s.strip_suffix(".txt")));
+                if let Some(d) = digits {
+                    if let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") {
+                        dates.insert(date);
+                    }
                 }
             }
         }
@@ -1287,9 +1321,10 @@ mod storage_tests {
         fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("SUPERTODO_DIR", &tmp);
 
-        // --- migration from a legacy .txt ---
+        // --- migration from a legacy top-level .txt into the todos folder ---
         let old = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
-        fs::write(file_for(&tmp, old), "[ ] Buy milk #home\n[x] Old done\n").unwrap();
+        let legacy_txt = tmp.join("todo_20200101.txt"); // old storage-root layout
+        fs::write(&legacy_txt, "[ ] Buy milk #home\n[x] Old done\n").unwrap();
         let items = load_day_items(&tmp, old);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].text, "Buy milk"); // inline tag stripped from title
@@ -1298,9 +1333,10 @@ mod storage_tests {
         assert_eq!(items[0].description, "");
         assert!(!items[0].checked);
         assert!(items[1].checked);
-        // A .json is written; the legacy .txt is left in place as a source.
+        // The canonical JSON now lives under todos/; the .txt stays as a source.
         assert!(json_file_for(&tmp, old).exists());
-        assert!(file_for(&tmp, old).exists());
+        assert!(json_file_for(&tmp, old).starts_with(tmp.join("todos")));
+        assert!(legacy_txt.exists());
 
         // --- carry-over preserves the original created date ---
         let later = NaiveDate::from_ymd_opt(2020, 1, 5).unwrap();
@@ -1335,6 +1371,43 @@ mod storage_tests {
         assert_eq!(day[idx].description, "Details here");
         assert_eq!(day[idx].tags, vec!["work".to_string(), "urgent".to_string()]);
         assert_eq!(day[idx].created, today_iso); // edits never touch created
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+
+    // A pre-todos-folder JSON day-file at the storage root is relocated into the
+    // todos folder (content preserved) and the top-level copy removed.
+    #[test]
+    fn todo_relocates_top_level_json() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_reloc_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        let date = NaiveDate::from_ymd_opt(2021, 3, 4).unwrap();
+        let top = tmp.join("todo_20210304.json");
+        let item = TodoItem {
+            checked: false,
+            carried: false,
+            rolled: false,
+            text: "Keep me".into(),
+            description: "body".into(),
+            created: "2021-03-04".into(),
+            tags: vec!["x".into()],
+        };
+        fs::write(&top, serde_json::to_string(&[item]).unwrap()).unwrap();
+
+        let items = load_day_items(&tmp, date);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "Keep me");
+        assert_eq!(items[0].description, "body");
+        assert_eq!(items[0].created, "2021-03-04");
+        // Now under todos/, and the top-level copy is gone.
+        assert!(json_file_for(&tmp, date).starts_with(tmp.join("todos")));
+        assert!(json_file_for(&tmp, date).exists());
+        assert!(!top.exists());
 
         let _ = fs::remove_dir_all(&tmp);
         std::env::remove_var("SUPERTODO_DIR");
