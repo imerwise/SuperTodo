@@ -68,15 +68,16 @@ const EMOJI_CATEGORIES = [
 //   action: function to execute
 //   modes:  which modes ("todo", "ideas") this command appears in
 const COMMANDS = [
-  { key: "T", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
+  { key: "H", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
   { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
-  { key: "T", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
-  { key: "K", label: "Tags", action: openTagList, modes: ["todo", "ideas"] },
+  { key: "H", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
+  { key: "T", label: "Tags", action: openTagList, modes: ["todo", "ideas"] },
   { key: "S", label: "Settings", action: openSettings, modes: ["todo", "ideas"] },
 ];
 
 // View state.
 let mode = "todo"; // "todo" | "ideas"
+let previousMode = "todo"; // the mode active before the current one (for Esc-back)
 let current = null; // YYYY-MM-DD of the viewed day
 let viewIsPast = false; // whether the viewed day is before today
 let lastData = null; // most recent DayData (for re-render on edit)
@@ -1107,6 +1108,8 @@ async function saveAndGoBack(slug, titleInput, textarea, originalIdea) {
 
 async function switchMode(newMode) {
   console.log("[ui] switchMode: from", mode, "to", newMode);
+  // Remember where we came from so Esc can return to the previous module.
+  if (newMode !== mode) previousMode = mode;
   hideEmojiPicker();
   editingIndex = null;
   pendingDeleteIndex = null;
@@ -1325,13 +1328,14 @@ function updateHints(force = null) {
       return;
     }
     if (n === 0) {
-      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Type", "to add"], ["⌥Menu", "Commands"]])}</span>`;
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Type", "to add"], ["Esc", "Back"], ["⌥", "Commands"]])}</span>`;
     } else {
       statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
         ["↑↓", "Move"],
         ["⏎", "Open"],
         ["⌫", "Delete"],
-        ["⌥Menu", "Commands"],
+        ["Esc", "Back"],
+        ["⌥", "Commands"],
       ])}</span>`;
     }
     measureHintTicker();
@@ -1352,13 +1356,13 @@ function updateHints(force = null) {
       const base = viewIsPast
         ? [["←→", "Day"], ["⇧←→", "Week"]]
         : [["Type", "to add"], ["←→", "Day"], ["⇧←→", "Week"]];
-      pairs = base.concat([["⌥Menu", "Commands"]]);
+      pairs = base.concat([["⌥", "Commands"]]);
     } else if (viewIsPast) {
       pairs = [
         ["↑↓", "Move"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
-        ["⌥Menu", "Commands"],
+        ["⌥", "Commands"],
       ];
     } else {
       pairs = [
@@ -1369,7 +1373,7 @@ function updateHints(force = null) {
         ["⌫", "Delete"],
         ["←→", "Day"],
         ["⇧←→", "Week"],
-        ["⌥Menu", "Commands"],
+        ["⌥", "Commands"],
       ];
     }
   }
@@ -2508,6 +2512,12 @@ document.addEventListener("keydown", (e) => {
     const n = ideas.length;
     if (inField && tag === "INPUT") {
       // In the add input — handled by its own events
+      return;
+    }
+    // Esc backs out of the Ideas module to the previous one (normally Todo).
+    if (e.key === "Escape") {
+      e.preventDefault();
+      switchMode(previousMode === "ideas" ? "todo" : previousMode);
       return;
     }
     if (n > 0) {
