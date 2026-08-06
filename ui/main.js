@@ -139,6 +139,7 @@ let ideas = []; // list of IdeaListEntry
 let ideaDetailSlug = null; // slug of idea being viewed in detail, or null
 let ideaDetailSourceIndex = null; // index in ideas[] when entering detail, for re-selecting on back
 let ideaDetailDirty = false; // whether detail has unsaved changes
+let todoDetailIndex = null; // index of the todo shown in its detail view, or null
 let emojiPickerTarget = null; // { slug, callback } for the active picker
 
 // --- date helpers (local, no timezone drift) ---
@@ -383,6 +384,7 @@ function renderTodo(data, fx = null) {
   lastData = data;
   current = data.date;
   viewIsPast = data.is_past;
+  todoDetailIndex = null; // rendering the list means we're out of the detail view
 
   weekdayEl.textContent = data.weekday;
   dateEl.textContent = data.pretty;
@@ -420,8 +422,6 @@ function renderTodo(data, fx = null) {
     pendingDeleteIndex = null;
   }
 
-  let editInputRef = null;
-
   data.items.forEach((item, index) => {
     const li = document.createElement("li");
     li.className =
@@ -451,33 +451,16 @@ function renderTodo(data, fx = null) {
     }
     li.appendChild(check);
 
-    if (!data.is_past && editingIndex === index) {
-      // Inline edit field.
-      const input = document.createElement("input");
-      input.className = "edit-input";
-      input.type = "text";
-      input.value = item.text;
-      input.addEventListener("keydown", (ev) => {
-        // Keep edit-field keys from reaching the global handler (otherwise the
-        // Enter that commits the edit would bubble up and re-open it).
-        ev.stopPropagation();
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          input.blur();
-        } else if (ev.key === "Escape") {
-          ev.preventDefault();
-          cancelEdit = true;
-          input.blur();
-        }
-      });
-      input.addEventListener("blur", () => commitEdit(index, input.value));
-      attachTagAutocomplete(input);
-      li.appendChild(input);
-      editInputRef = input;
-    } else {
+    {
       const label = document.createElement("span");
       label.className = "label";
       fillTodoLabel(label, item.text, item.tags);
+      // Clicking the task text opens its detail view (title / description /
+      // tags), the way clicking an idea does. Past days are review-only.
+      if (!data.is_past) {
+        label.classList.add("clickable");
+        label.addEventListener("click", () => renderTodoDetail(index));
+      }
       li.appendChild(label);
 
       if (item.rolled) {
@@ -523,9 +506,9 @@ function renderTodo(data, fx = null) {
 
         const edit = document.createElement("button");
         edit.className = "icon-btn";
-        edit.title = "Edit task";
+        edit.title = "Open task";
         edit.innerHTML = PENCIL_SVG;
-        edit.addEventListener("click", () => startEdit(index));
+        edit.addEventListener("click", () => renderTodoDetail(index));
 
         const del = document.createElement("button");
         del.className = "icon-btn danger";
@@ -542,13 +525,129 @@ function renderTodo(data, fx = null) {
     listEl.appendChild(li);
   });
 
-  if (editInputRef) {
-    editInputRef.focus();
-    editInputRef.select();
-  }
-
   applyFx(fx);
   updateHints();
+}
+
+// --- todo detail view -----------------------------------------------------
+
+// A full-screen detail for one task, mirroring the idea detail: an editable
+// title, its created date, a tag box, and a Markdown description. Opened from
+// the day list (Enter / click / pencil). Each field persists on blur via
+// edit_task; Esc saves and returns to the day list.
+function renderTodoDetail(index) {
+  if (!lastData || !lastData.items || !lastData.items[index]) return;
+  const date = lastData.date;
+  const item = lastData.items[index];
+  todoDetailIndex = index;
+  pendingDeleteIndex = null;
+  editingIndex = null;
+
+  weekdayEl.textContent = lastData.weekday;
+  dateEl.textContent = lastData.pretty;
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  composerEl.style.display = "none";
+  listEl.innerHTML = "";
+  emptyEl.hidden = true;
+
+  const detail = document.createElement("div");
+  detail.className = "idea-detail todo-detail";
+
+  // Title (no emoji for todos).
+  const topRow = document.createElement("div");
+  topRow.className = "detail-top";
+
+  const titleInput = document.createElement("input");
+  titleInput.className = "detail-title-input";
+  titleInput.type = "text";
+  titleInput.value = item.text;
+  titleInput.addEventListener("blur", () => {
+    const t = titleInput.value.trim();
+    if (t && t !== item.text) {
+      // Todos don't re-slug, so there's no need to rebuild the view (which would
+      // steal focus); just persist and keep the local copy in sync.
+      invoke("edit_task", { date, index, text: t }).then((data) => {
+        lastData = data;
+        item.text = t;
+      });
+    }
+  });
+  titleInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      titleInput.blur();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      saveAndGoBackTodo(date, index, titleInput, textarea, item);
+    }
+  });
+  topRow.appendChild(titleInput);
+  detail.appendChild(topRow);
+
+  // Created date.
+  const createdLine = document.createElement("div");
+  createdLine.className = "detail-created";
+  createdLine.textContent = item.created ? `Created: ${item.created}` : "";
+  detail.appendChild(createdLine);
+
+  // Tags — the shared token box, persisting via edit_task.
+  detail.appendChild(buildTodoTagBox(date, index, item));
+
+  // Description.
+  const descLabel = document.createElement("div");
+  descLabel.className = "detail-desc-label";
+  descLabel.textContent = "Description (Markdown)";
+  detail.appendChild(descLabel);
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "detail-textarea";
+  textarea.value = item.description || "";
+  textarea.spellcheck = false;
+  textarea.addEventListener("blur", () => {
+    if (textarea.value !== (item.description || "")) {
+      invoke("edit_task", { date, index, description: textarea.value }).then(
+        (data) => {
+          lastData = data;
+          item.description = textarea.value;
+        }
+      );
+    }
+  });
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      saveAndGoBackTodo(date, index, titleInput, textarea, item);
+    }
+  });
+  detail.appendChild(textarea);
+
+  listEl.appendChild(detail);
+  titleInput.focus();
+  updateHints();
+}
+
+// Persist any pending title/description edits, then return to the day list.
+async function saveAndGoBackTodo(date, index, titleInput, textarea, item) {
+  const newTitle = titleInput.value.trim();
+  const newDesc = textarea.value;
+  if (newTitle && newTitle !== item.text) {
+    lastData = await invoke("edit_task", { date, index, text: newTitle });
+  }
+  if (newDesc !== (item.description || "")) {
+    lastData = await invoke("edit_task", { date, index, description: newDesc });
+  }
+  closeTodoDetail(index);
+}
+
+// Leave the todo detail and re-render the day list, keeping the row selected.
+function closeTodoDetail(index) {
+  todoDetailIndex = null;
+  if (typeof index === "number") selectedIndex = index;
+  renderTodo(lastData);
 }
 
 // --- idea list view -------------------------------------------------------
@@ -779,11 +878,12 @@ function renderIdeaDetail(slug) {
   });
 }
 
-// A token box for an idea's tags: removable chips plus an add-input with
-// autocomplete over the shared vocabulary. Each add/remove persists immediately
-// via editIdea, so tags survive even if the detail view is closed without
-// touching the title/description.
-function buildIdeaTagBox(idea) {
+// A reusable token box: removable tag chips plus an add-input with autocomplete
+// over the shared vocabulary. `initialTags` seeds it; `onSave(tags)` is awaited
+// after every add/remove to persist the change, so tags survive even if the
+// detail view is closed without touching anything else. Used by both ideas and
+// todos — only the persistence callback differs.
+function buildTagBox(initialTags, onSave) {
   const wrap = document.createElement("div");
   wrap.className = "detail-tags";
 
@@ -796,7 +896,7 @@ function buildIdeaTagBox(idea) {
   box.className = "tag-box";
   wrap.appendChild(box);
 
-  let tags = (idea.tags || []).slice();
+  let tags = (initialTags || []).slice();
 
   const input = document.createElement("input");
   input.className = "tag-box-input";
@@ -808,8 +908,7 @@ function buildIdeaTagBox(idea) {
   // Persist, then refresh the color map so a newly added tag's chip gets its
   // real ledger color immediately (not the fallback) on the redraw that follows.
   async function save() {
-    idea.tags = tags.slice();
-    await editIdea(idea.slug, null, null, null, tags.slice());
+    await onSave(tags.slice());
     await refreshTags();
   }
 
@@ -960,6 +1059,22 @@ function buildIdeaTagBox(idea) {
 
   redraw();
   return wrap;
+}
+
+// An idea's tag box: persists via editIdea.
+function buildIdeaTagBox(idea) {
+  return buildTagBox(idea.tags, async (tags) => {
+    idea.tags = tags;
+    await editIdea(idea.slug, null, null, null, tags);
+  });
+}
+
+// A todo's tag box: persists via edit_task for the given day + row.
+function buildTodoTagBox(date, index, item) {
+  return buildTagBox(item.tags, async (tags) => {
+    item.tags = tags;
+    lastData = await invoke("edit_task", { date, index, tags });
+  });
 }
 
 // --- emoji picker ---------------------------------------------------------
@@ -1115,6 +1230,7 @@ async function switchMode(newMode) {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  todoDetailIndex = null;
   inputEl.blur();
 
   // If coming back from idea detail, re-select the source idea
@@ -1309,6 +1425,13 @@ function updateHints(force = null) {
 
   // Idea detail view hints
   if (mode === "ideas" && ideaDetailSlug) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
+  // Todo detail view hints
+  if (mode === "todo" && todoDetailIndex !== null) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
     measureHintTicker();
     return;
@@ -2208,30 +2331,6 @@ function confirmPendingDelete() {
   }
 }
 
-function startEdit(index) {
-  editingIndex = index;
-  pendingDeleteIndex = null;
-  render(lastData);
-}
-
-async function commitEdit(index, value) {
-  if (editingIndex !== index) return; // already handled
-  editingIndex = null;
-  if (cancelEdit) {
-    cancelEdit = false;
-    render(await invoke("get_day", { date: current }));
-    return;
-  }
-  const text = value.trim();
-  if (!text) {
-    render(await invoke("get_day", { date: current }));
-    return;
-  }
-  const data = await invoke("edit_task", { date: current, index, text });
-  await refreshTags();
-  render(data);
-}
-
 // --- drag & drop reordering (pointer-based; reliable inside WKWebView) ---
 function onRowPointerDown(e) {
   if (e.button !== 0) return; // left button / primary touch only
@@ -2507,6 +2606,18 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
+  // --- Todo detail view keyboard ---
+  if (mode === "todo" && todoDetailIndex !== null) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      // The title/description fields save + close on their own Esc (and stop
+      // propagation). Reaching here means focus was elsewhere (e.g. the tag
+      // box), where each field's blur has already persisted — just close.
+      closeTodoDetail(todoDetailIndex);
+    }
+    return;
+  }
+
   // --- Idea list view keyboard ---
   if (mode === "ideas") {
     const n = ideas.length;
@@ -2622,7 +2733,7 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.key === "Enter" && selectedIndex !== null) {
       e.preventDefault();
-      if (!viewIsPast) startEdit(selectedIndex);
+      if (!viewIsPast) renderTodoDetail(selectedIndex);
       return;
     }
     if (

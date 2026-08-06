@@ -4,21 +4,26 @@ use std::fs;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// File format (one task per line):
+// Storage: one structured JSON file per day, todo_YYYYMMDD.json, holding an
+// array of tasks (text/description/tags/created + checked/carried/rolled flags).
 //
-//   [ ] Task to do          -> not done
-//   [x] Task to do          -> done
-//   [>] Task to do          -> was NOT done and has been rolled over to a
-//                              later day (stays visible in the old file)
-//   [ ] ↪ Task to do        -> the "↪" marks a task that was carried over
-//                              from a previous day into this day's list
+// Legacy plain-text files (todo_YYYYMMDD.txt) from earlier versions are still
+// read: the first time a day is loaded without a .json, its .txt is migrated
+// (inline "#tags" extracted into structured tags, title cleaned, created set to
+// the file's date) and a .json is written. The old .txt is left in place as a
+// read-only source and is not kept in sync afterwards.
 //
-// Files live in ~/Documents/SuperTodo/todo_YYYYMMDD.txt
+//   Legacy line format:
+//     [ ] Task     -> not done      [x] Task -> done
+//     [>] Task     -> rolled over to a later day (stays in the old file)
+//     [ ] ↪ Task   -> carried over from a previous day
+//
+// Files live in ~/Documents/SuperTodo/ (or the folder chosen in Settings).
 // ---------------------------------------------------------------------------
 
 const CARRY_MARK: char = '\u{21AA}'; // ↪
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct TodoItem {
     checked: bool,
     carried: bool,
@@ -27,10 +32,20 @@ struct TodoItem {
     // "moved on". Preserving this flag through read/write is what keeps
     // carry-over idempotent — a rolled item is never carried again.
     rolled: bool,
+    // The task title. Idea-style: no inline "#tags" — tags are stored explicitly
+    // below and edited via the detail-view tag box.
     text: String,
-    // Hashtags found inline in `text` (e.g. "#work"). Derived on read, never
-    // stored separately — `text` keeps the raw "#tag" so format_item round-trips
-    // unchanged and carry-over is untouched.
+    // The Markdown body, edited in the todo detail view. Empty for a bare task.
+    #[serde(default)]
+    description: String,
+    // Original creation date (ISO "YYYY-MM-DD"). Set once when the task is first
+    // added and *preserved* when the task carries over to a later day, so the
+    // detail view always shows when the task was really created.
+    #[serde(default)]
+    created: String,
+    // Structured tags, authoritative and persisted (like ideas). Edited via the
+    // tag box; not parsed from `text`.
+    #[serde(default)]
     tags: Vec<String>,
 }
 
@@ -142,6 +157,12 @@ fn storage_dir() -> PathBuf {
     dir
 }
 
+/// The structured JSON day-file path (current format).
+fn json_file_for(dir: &PathBuf, date: NaiveDate) -> PathBuf {
+    dir.join(format!("todo_{}.json", date.format("%Y%m%d")))
+}
+
+/// The legacy plain-text day-file path (migration source only).
 fn file_for(dir: &PathBuf, date: NaiveDate) -> PathBuf {
     dir.join(format!("todo_{}.txt", date.format("%Y%m%d")))
 }
@@ -192,6 +213,36 @@ fn extract_tags(text: &str) -> Vec<String> {
     out
 }
 
+/// Removes inline "#tag" tokens (same char class as `extract_tags`) from text
+/// and collapses the leftover whitespace. Used when migrating legacy tasks so a
+/// stored title reads like an idea's — clean, with tags held separately.
+fn strip_tags(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' {
+            let start = i + 1;
+            let mut j = start;
+            while j < chars.len() {
+                let c = chars[j];
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j > start {
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
 fn parse_item(line: &str) -> Option<TodoItem> {
     let status = status_char(line)?;
     let checked = status == 'x' || status == 'X';
@@ -211,39 +262,88 @@ fn parse_item(line: &str) -> Option<TodoItem> {
         carried,
         rolled,
         text: rest.to_string(),
+        description: String::new(),
+        created: String::new(),
         tags,
     })
 }
 
-fn format_item(item: &TodoItem) -> String {
-    // A rolled-over task must round-trip back to [>] — writing it as [ ] would
-    // make carry-over re-carry it and duplicate the task.
-    let mark = if item.rolled {
-        '>'
-    } else if item.checked {
-        'x'
-    } else {
-        ' '
-    };
-    if item.carried {
-        format!("[{}] {} {}", mark, CARRY_MARK, item.text)
-    } else {
-        format!("[{}] {}", mark, item.text)
-    }
+/// Reads the structured tasks from a JSON day-file path. Empty/missing/invalid
+/// yields an empty list.
+fn read_items_json(path: &PathBuf) -> Vec<TodoItem> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
-fn read_items(path: &PathBuf) -> Vec<TodoItem> {
+/// Migrates a legacy plain-text day-file into structured tasks: inline "#tags"
+/// become explicit tags, the title is cleaned of them, and `created` is set to
+/// the file's own date (the best available original date).
+fn migrate_txt_items(path: &PathBuf, iso_date: &str) -> Vec<TodoItem> {
     let content = fs::read_to_string(path).unwrap_or_default();
-    content.lines().filter_map(parse_item).collect()
+    content
+        .lines()
+        .filter_map(parse_item)
+        .map(|mut item| {
+            item.tags = extract_tags(&item.text);
+            item.text = strip_tags(&item.text);
+            item.description = String::new();
+            item.created = iso_date.to_string();
+            item
+        })
+        .filter(|item| !item.text.is_empty())
+        .collect()
 }
 
-fn write_items(path: &PathBuf, items: &[TodoItem]) {
-    let mut out = String::new();
-    for item in items {
-        out.push_str(&format_item(item));
-        out.push('\n');
+/// Whether any day-file (JSON or legacy .txt) exists for `date`.
+fn day_exists(dir: &PathBuf, date: NaiveDate) -> bool {
+    json_file_for(dir, date).exists() || file_for(dir, date).exists()
+}
+
+/// Loads a day's tasks. Prefers the JSON file; if only a legacy .txt exists it
+/// is migrated once (the .json is written) and the migrated items returned.
+fn load_day_items(dir: &PathBuf, date: NaiveDate) -> Vec<TodoItem> {
+    let json_path = json_file_for(dir, date);
+    if json_path.exists() {
+        return read_items_json(&json_path);
     }
-    let _ = fs::write(path, out);
+    let txt_path = file_for(dir, date);
+    if txt_path.exists() {
+        let iso = date.format("%Y-%m-%d").to_string();
+        let items = migrate_txt_items(&txt_path, &iso);
+        write_day_items(dir, date, &items);
+        return items;
+    }
+    Vec::new()
+}
+
+/// Writes a day's tasks to its JSON file.
+fn write_day_items(dir: &PathBuf, date: NaiveDate, items: &[TodoItem]) {
+    let path = json_file_for(dir, date);
+    if let Ok(json) = serde_json::to_string_pretty(items) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+/// Every date that has a day-file (JSON or legacy .txt), deduped.
+fn all_todo_dates(dir: &PathBuf) -> Vec<NaiveDate> {
+    use std::collections::BTreeSet;
+    let mut dates: BTreeSet<NaiveDate> = BTreeSet::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let digits = name
+                .strip_prefix("todo_")
+                .and_then(|s| s.strip_suffix(".json").or_else(|| s.strip_suffix(".txt")));
+            if let Some(d) = digits {
+                if let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") {
+                    dates.insert(date);
+                }
+            }
+        }
+    }
+    dates.into_iter().collect()
 }
 
 // --- ideas helpers ---------------------------------------------------------
@@ -293,18 +393,18 @@ fn tags_in_creation_order(dir: &PathBuf) -> Vec<String> {
         }
     }
 
-    if let Ok(rd) = fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(digits) = name.strip_prefix("todo_").and_then(|s| s.strip_suffix(".txt")) {
-                if let Ok(d) = NaiveDate::parse_from_str(digits, "%Y%m%d") {
-                    let iso = d.format("%Y-%m-%d").to_string();
-                    for item in read_items(&entry.path()) {
-                        for t in &item.tags {
-                            note(&mut first, t, &iso);
-                        }
-                    }
-                }
+    for date in all_todo_dates(dir) {
+        let file_iso = date.format("%Y-%m-%d").to_string();
+        for item in load_day_items(dir, date) {
+            // Prefer the task's own creation date; fall back to the day-file's
+            // date for anything migrated/older without one.
+            let iso = if item.created.is_empty() {
+                file_iso.clone()
+            } else {
+                item.created.clone()
+            };
+            for t in &item.tags {
+                note(&mut first, t, &iso);
             }
         }
     }
@@ -434,23 +534,12 @@ fn unique_slug(_dir: &PathBuf, base: &str, entries: &[IdeaListEntry]) -> String 
 
 // --- carry-over ------------------------------------------------------------
 
-/// Finds the most recent existing todo file dated strictly before `today`.
-fn find_prev_file(dir: &PathBuf, today: NaiveDate) -> Option<(PathBuf, NaiveDate)> {
-    let mut best: Option<(PathBuf, NaiveDate)> = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let digits = name
-            .strip_prefix("todo_")
-            .and_then(|s| s.strip_suffix(".txt"));
-        if let Some(d) = digits {
-            if let Ok(date) = NaiveDate::parse_from_str(d, "%Y%m%d") {
-                if date < today && best.as_ref().map_or(true, |(_, b)| date > *b) {
-                    best = Some((entry.path(), date));
-                }
-            }
-        }
-    }
-    best
+/// The most recent day (JSON or legacy .txt) dated strictly before `today`.
+fn find_prev_day(dir: &PathBuf, today: NaiveDate) -> Option<NaiveDate> {
+    all_todo_dates(dir)
+        .into_iter()
+        .filter(|d| *d < today)
+        .max()
 }
 
 /// Ensures today's file is up to date. Carries over every unfinished task from
@@ -461,56 +550,47 @@ fn find_prev_file(dir: &PathBuf, today: NaiveDate) -> Option<(PathBuf, NaiveDate
 /// carried, its source line becomes [>] and is never carried again. It also
 /// works when today's file already exists (e.g. it was pre-created by adding a
 /// future task) — carried items are merged in rather than overwriting.
-fn ensure_today(dir: &PathBuf, today: NaiveDate) -> PathBuf {
-    let path = file_for(dir, today);
-    let existed = path.exists();
+fn ensure_today(dir: &PathBuf, today: NaiveDate) {
+    let existed = day_exists(dir, today);
     let mut items = if existed {
-        read_items(&path)
+        load_day_items(dir, today)
     } else {
         Vec::new()
     };
     let mut carried_any = false;
 
-    if let Some((prev_path, _)) = find_prev_file(dir, today) {
-        let content = fs::read_to_string(&prev_path).unwrap_or_default();
-        let mut new_lines: Vec<String> = Vec::new();
+    if let Some(prev_date) = find_prev_day(dir, today) {
+        let mut prev_items = load_day_items(dir, prev_date);
         let mut prev_changed = false;
 
-        for line in content.lines() {
-            match (status_char(line), parse_item(line)) {
-                (Some(status), Some(item)) if !item.checked && status != '>' => {
-                    // Unfinished -> carry it into today, mark old line as moved.
-                    items.push(TodoItem {
-                        checked: false,
-                        carried: true,
-                        rolled: false,
-                        text: item.text.clone(),
-                        tags: item.tags.clone(),
-                    });
-                    let mark = if item.carried {
-                        format!("{} ", CARRY_MARK)
-                    } else {
-                        String::new()
-                    };
-                    new_lines.push(format!("[>] {}{}", mark, item.text));
-                    prev_changed = true;
-                    carried_any = true;
-                }
-                _ => new_lines.push(line.trim_end().to_string()),
+        for src in prev_items.iter_mut() {
+            // Unfinished and not already rolled -> carry it into today, keeping
+            // the original created date, description and tags. Mark the source
+            // as rolled so it is never carried again (idempotent on re-open).
+            if !src.checked && !src.rolled {
+                items.push(TodoItem {
+                    checked: false,
+                    carried: true,
+                    rolled: false,
+                    text: src.text.clone(),
+                    description: src.description.clone(),
+                    created: src.created.clone(),
+                    tags: src.tags.clone(),
+                });
+                src.rolled = true;
+                prev_changed = true;
+                carried_any = true;
             }
         }
 
         if prev_changed {
-            let mut updated = new_lines.join("\n");
-            updated.push('\n');
-            let _ = fs::write(&prev_path, updated);
+            write_day_items(dir, prev_date, &prev_items);
         }
     }
 
     if !existed || carried_any {
-        write_items(&path, &items);
+        write_day_items(dir, today, &items);
     }
-    path
 }
 
 fn today() -> NaiveDate {
@@ -529,12 +609,10 @@ fn build_day(date: NaiveDate) -> DayData {
     let today = today();
     let is_today = date == today;
     let is_past = date < today;
-    let path = if is_today {
-        ensure_today(&dir, date)
-    } else {
-        file_for(&dir, date)
-    };
-    let exists = path.exists();
+    if is_today {
+        ensure_today(&dir, date);
+    }
+    let exists = day_exists(&dir, date);
     DayData {
         date: date.format("%Y-%m-%d").to_string(),
         weekday: date.format("%A").to_string(),
@@ -542,7 +620,7 @@ fn build_day(date: NaiveDate) -> DayData {
         is_today,
         is_past,
         exists,
-        items: if exists { read_items(&path) } else { Vec::new() },
+        items: if exists { load_day_items(&dir, date) } else { Vec::new() },
     }
 }
 
@@ -561,44 +639,85 @@ fn get_day(date: String) -> DayData {
 #[tauri::command]
 fn add_task(date: String, text: String) -> DayData {
     let d = parse_iso(&date);
-    let text = text.trim().to_string();
+    let raw = text.trim().to_string();
     // Tasks may only be added to today or a future day, never to the past.
-    if !text.is_empty() && d >= today() {
+    if !raw.is_empty() && d >= today() {
         let dir = storage_dir();
         // For today, ensure carry-over first; other days just get their file.
-        let path = if d == today() {
-            ensure_today(&dir, d)
-        } else {
-            file_for(&dir, d)
-        };
-        let mut items = read_items(&path);
-        let tags = extract_tags(&text);
+        if d == today() {
+            ensure_today(&dir, d);
+        }
+        let mut items = load_day_items(&dir, d);
+        // Idea-style: the title stands alone. As a convenience any inline "#tags"
+        // typed in the composer are lifted into structured tags and stripped from
+        // the title — but typing "#" is not required; tags are normally added in
+        // the detail view.
+        let tags = extract_tags(&raw);
+        let stripped = strip_tags(&raw);
+        // If the composer held only "#tags", keep the raw text as the title
+        // rather than storing an empty one.
+        let text = if stripped.is_empty() { raw } else { stripped };
         items.push(TodoItem {
             checked: false,
             carried: false,
             rolled: false,
             text,
+            description: String::new(),
+            created: today().format("%Y-%m-%d").to_string(),
             tags,
         });
-        write_items(&path, &items);
+        write_day_items(&dir, d, &items);
     }
     build_day(d)
 }
 
+/// Edits a task's title, description and/or tags — each field independent and
+/// optional, mirroring `edit_idea`. Allowed only on today or a future day.
 #[tauri::command]
-fn edit_task(date: String, index: usize, text: String) -> DayData {
+fn edit_task(
+    date: String,
+    index: usize,
+    text: Option<String>,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+) -> DayData {
     let d = parse_iso(&date);
-    let text = text.trim().to_string();
-    // Text edits are allowed only on today or a future day.
-    if !text.is_empty() && d >= today() {
-        let dir = storage_dir();
-        let path = file_for(&dir, d);
-        if path.exists() {
-            let mut items = read_items(&path);
-            if let Some(item) = items.get_mut(index) {
-                item.tags = extract_tags(&text);
-                item.text = text;
-                write_items(&path, &items);
+    let dir = storage_dir();
+    if d >= today() && day_exists(&dir, d) {
+        let mut items = load_day_items(&dir, d);
+        if let Some(item) = items.get_mut(index) {
+            let mut changed = false;
+            if let Some(t) = text {
+                let t = t.trim().to_string();
+                if !t.is_empty() {
+                    // Convenience: lift any inline "#tags" out of the new title
+                    // and merge them into the structured tags (explicit tags set
+                    // via `tags` still win when provided).
+                    let extracted = extract_tags(&t);
+                    let stripped = strip_tags(&t);
+                    item.text = if stripped.is_empty() { t } else { stripped };
+                    if !extracted.is_empty() {
+                        let mut merged = item.tags.clone();
+                        for e in extracted {
+                            if !merged.iter().any(|x| x.eq_ignore_ascii_case(&e)) {
+                                merged.push(e);
+                            }
+                        }
+                        item.tags = normalize_tags(&merged);
+                    }
+                    changed = true;
+                }
+            }
+            if let Some(desc) = description {
+                item.description = desc;
+                changed = true;
+            }
+            if let Some(tg) = tags {
+                item.tags = normalize_tags(&tg);
+                changed = true;
+            }
+            if changed {
+                write_day_items(&dir, d, &items);
             }
         }
     }
@@ -611,9 +730,8 @@ fn reorder_task(date: String, order: Vec<usize>) -> DayData {
     // Reordering is allowed only on today or a future day.
     if d >= today() {
         let dir = storage_dir();
-        let path = file_for(&dir, d);
-        if path.exists() {
-            let items = read_items(&path);
+        if day_exists(&dir, d) {
+            let items = load_day_items(&dir, d);
             // `order` must be a permutation of 0..items.len().
             if order.len() == items.len() {
                 let mut seen = vec![false; items.len()];
@@ -628,7 +746,7 @@ fn reorder_task(date: String, order: Vec<usize>) -> DayData {
                 if valid {
                     let reordered: Vec<TodoItem> =
                         order.iter().map(|&i| items[i].clone()).collect();
-                    write_items(&path, &reordered);
+                    write_day_items(&dir, d, &reordered);
                 }
             }
         }
@@ -644,14 +762,13 @@ fn toggle_task(date: String, index: usize) -> DayData {
     // carry-over, duplicating tasks — so it must never happen.
     if d >= today() {
         let dir = storage_dir();
-        let path = file_for(&dir, d);
-        if path.exists() {
-            let mut items = read_items(&path);
+        if day_exists(&dir, d) {
+            let mut items = load_day_items(&dir, d);
             if let Some(item) = items.get_mut(index) {
                 // A rolled-over task lives on in a later day; it isn't toggled.
                 if !item.rolled {
                     item.checked = !item.checked;
-                    write_items(&path, &items);
+                    write_day_items(&dir, d, &items);
                 }
             }
         }
@@ -665,12 +782,11 @@ fn delete_task(date: String, index: usize) -> DayData {
     // Deletion is allowed only on today or a future day (past is review-only).
     if d >= today() {
         let dir = storage_dir();
-        let path = file_for(&dir, d);
-        if path.exists() {
-            let mut items = read_items(&path);
+        if day_exists(&dir, d) {
+            let mut items = load_day_items(&dir, d);
             if index < items.len() {
                 items.remove(index);
-                write_items(&path, &items);
+                write_day_items(&dir, d, &items);
             }
         }
     }
@@ -1010,24 +1126,11 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
 
     let mut todos: Vec<TaggedTodo> = Vec::new();
     if !needles.is_empty() {
-        // Collect matching todos from every todo_YYYYMMDD.txt, newest day first.
-        let mut dated: Vec<(NaiveDate, PathBuf)> = Vec::new();
-        if let Ok(rd) = fs::read_dir(&dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if let Some(digits) = name
-                    .strip_prefix("todo_")
-                    .and_then(|s| s.strip_suffix(".txt"))
-                {
-                    if let Ok(date) = NaiveDate::parse_from_str(digits, "%Y%m%d") {
-                        dated.push((date, entry.path()));
-                    }
-                }
-            }
-        }
-        dated.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
-        for (date, path) in dated {
-            for item in read_items(&path) {
+        // Collect matching todos from every day-file, newest day first.
+        let mut dates = all_todo_dates(&dir);
+        dates.sort_by_key(|date| std::cmp::Reverse(*date));
+        for date in dates {
+            for item in load_day_items(&dir, date) {
                 if matches(&item.tags) {
                     todos.push(TaggedTodo {
                         date: date.format("%Y-%m-%d").to_string(),
@@ -1125,6 +1228,11 @@ fn reset_storage_dir() -> StorageInfo {
 #[cfg(test)]
 mod storage_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // These tests mutate process-global env vars (HOME / SUPERTODO_DIR); serialize
+    // them so a parallel test runner can't interleave the mutations.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // Drives the storage-location commands end to end against an isolated HOME so
     // real data/config is never touched. Verifies: default when unset, that
@@ -1132,6 +1240,7 @@ mod storage_tests {
     // that reset reverts to the default.
     #[test]
     fn set_and_reset_storage_dir() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("supertodo_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
@@ -1164,6 +1273,71 @@ mod storage_tests {
         assert_eq!(storage_dir(), default);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // Exercises the todo data-model changes end to end against an isolated
+    // storage dir: legacy .txt migration (tags lifted, title cleaned, created
+    // set to the file date), carry-over preserving the original created date,
+    // and edit_task updating description/tags without touching created.
+    #[test]
+    fn todo_migration_carryover_and_edit() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_todo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        // --- migration from a legacy .txt ---
+        let old = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        fs::write(file_for(&tmp, old), "[ ] Buy milk #home\n[x] Old done\n").unwrap();
+        let items = load_day_items(&tmp, old);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].text, "Buy milk"); // inline tag stripped from title
+        assert_eq!(items[0].tags, vec!["home".to_string()]);
+        assert_eq!(items[0].created, "2020-01-01"); // created = file date
+        assert_eq!(items[0].description, "");
+        assert!(!items[0].checked);
+        assert!(items[1].checked);
+        // A .json is written; the legacy .txt is left in place as a source.
+        assert!(json_file_for(&tmp, old).exists());
+        assert!(file_for(&tmp, old).exists());
+
+        // --- carry-over preserves the original created date ---
+        let later = NaiveDate::from_ymd_opt(2020, 1, 5).unwrap();
+        ensure_today(&tmp, later);
+        let carried = load_day_items(&tmp, later);
+        assert_eq!(carried.len(), 1); // only the unfinished task carried
+        assert_eq!(carried[0].text, "Buy milk");
+        assert!(carried[0].carried);
+        assert_eq!(carried[0].created, "2020-01-01"); // NOT reset to the new day
+        assert_eq!(carried[0].tags, vec!["home".to_string()]);
+        // The source task is now rolled, so re-running never carries it twice.
+        assert!(load_day_items(&tmp, old)[0].rolled);
+        ensure_today(&tmp, later);
+        assert_eq!(load_day_items(&tmp, later).len(), 1);
+
+        // --- add_task sets created=today; edit_task edits desc/tags ---
+        let today_iso = today().format("%Y-%m-%d").to_string();
+        add_task(today_iso.clone(), "Write report #work".into());
+        let day = load_day_items(&tmp, today());
+        let idx = day.iter().position(|t| t.text == "Write report").unwrap();
+        assert_eq!(day[idx].tags, vec!["work".to_string()]); // inline tag lifted
+        assert_eq!(day[idx].created, today_iso);
+
+        edit_task(
+            today_iso.clone(),
+            idx,
+            None,
+            Some("Details here".into()),
+            Some(vec!["work".into(), "urgent".into()]),
+        );
+        let day = load_day_items(&tmp, today());
+        assert_eq!(day[idx].description, "Details here");
+        assert_eq!(day[idx].tags, vec!["work".to_string(), "urgent".to_string()]);
+        assert_eq!(day[idx].created, today_iso); // edits never touch created
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
     }
 }
 

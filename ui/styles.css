@@ -294,6 +294,11 @@ body {
   word-break: break-word;
 }
 
+/* A task label that opens its detail view on click. */
+.label.clickable {
+  cursor: pointer;
+}
+
 .label-text {
   position: relative;
 }
