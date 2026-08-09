@@ -24,8 +24,28 @@ use std::path::PathBuf;
 
 const CARRY_MARK: char = '\u{21AA}'; // ↪
 
+/// A compact unique id for a todo item / run: hex epoch-nanos plus a process
+/// counter, so ids never collide within a run of the app and practically never
+/// across restarts. No external crate needed.
+pub(crate) fn new_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:04x}", nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct TodoItem {
+    // Stable id, generated once in add_task and preserved through carry-over,
+    // so an agent run can be attached to a task across edits and reorders.
+    // Items that predate the field may carry "" until their day-file is next
+    // written — write_day_items backfills them.
+    #[serde(default)]
+    id: String,
     checked: bool,
     carried: bool,
     // A [>] line: this task was unfinished and has been rolled over to a later
@@ -98,9 +118,9 @@ struct AppConfig {
     // Absolute path chosen by the user. Empty/None means "use the default".
     #[serde(default)]
     storage_dir: Option<String>,
-}
+    }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join("Library")
@@ -112,14 +132,14 @@ fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
-fn read_config() -> AppConfig {
+pub(crate) fn read_config() -> AppConfig {
     fs::read_to_string(config_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-fn write_config(cfg: &AppConfig) {
+pub(crate) fn write_config(cfg: &AppConfig) {
     let dir = config_dir();
     let _ = fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string_pretty(cfg) {
@@ -134,7 +154,7 @@ fn default_storage_dir() -> PathBuf {
     PathBuf::from(home).join("Documents").join("SuperTodo")
 }
 
-fn storage_dir() -> PathBuf {
+pub(crate) fn storage_dir() -> PathBuf {
     // SUPERTODO_DIR overrides everything — used for isolated testing so real
     // data is never touched. When set, it also wins over the user's Settings
     // choice; get_storage_info reports this so the UI can disable the controls.
@@ -275,6 +295,7 @@ fn parse_item(line: &str) -> Option<TodoItem> {
     }
     let tags = extract_tags(rest);
     Some(TodoItem {
+        id: String::new(), // backfilled on write
         checked,
         carried,
         rolled,
@@ -349,10 +370,18 @@ fn load_day_items(dir: &PathBuf, date: NaiveDate) -> Vec<TodoItem> {
     Vec::new()
 }
 
-/// Writes a day's tasks to its JSON file.
+/// Writes a day's tasks to its JSON file, backfilling ids on items that
+/// predate the id field. Backfill never extends writes to past days: this is
+/// only called for past files by carry-over's own (already guarded) write.
 fn write_day_items(dir: &PathBuf, date: NaiveDate, items: &[TodoItem]) {
+    let mut items = items.to_vec();
+    for item in items.iter_mut() {
+        if item.id.is_empty() {
+            item.id = new_id();
+        }
+    }
     let path = json_file_for(dir, date);
-    if let Ok(json) = serde_json::to_string_pretty(items) {
+    if let Ok(json) = serde_json::to_string_pretty(&items) {
         let _ = fs::write(&path, json);
     }
 }
@@ -603,6 +632,7 @@ fn ensure_today(dir: &PathBuf, today: NaiveDate) {
             // as rolled so it is never carried again (idempotent on re-open).
             if !src.checked && !src.rolled {
                 items.push(TodoItem {
+                    id: src.id.clone(), // the task keeps its identity across days
                     checked: false,
                     carried: true,
                     rolled: false,
@@ -692,6 +722,7 @@ fn add_task(date: String, text: String) -> DayData {
         // rather than storing an empty one.
         let text = if stripped.is_empty() { raw } else { stripped };
         items.push(TodoItem {
+            id: new_id(),
             checked: false,
             carried: false,
             rolled: false,
@@ -1017,6 +1048,7 @@ fn delete_idea(slug: String) -> Vec<IdeaListEntry> {
 struct TaggedTodo {
     date: String,  // YYYY-MM-DD
     index: usize,  // position within its day, so the UI can open its detail
+    id: String,    // stable task id (may be "" for never-rewritten legacy items)
     checked: bool,
     rolled: bool,
     text: String,
@@ -1170,6 +1202,7 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
                     todos.push(TaggedTodo {
                         date: date.format("%Y-%m-%d").to_string(),
                         index,
+                        id: item.id.clone(),
                         checked: item.checked,
                         rolled: item.rolled,
                         text: item.text,
@@ -1190,6 +1223,232 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
     };
 
     TaggedResult { tag: needles.join(", "), todos, ideas }
+}
+
+// --- projects ---------------------------------------------------------------
+// A project links exactly one tag to a folder on disk (typically a code
+// repository) plus free-form Markdown notes. It is what agent runs work on:
+// dispatching an agent on a tagged todo/idea runs it in the owning project's
+// folder. Metadata lives in projects/projects_index.json; the notes body in
+// projects/<slug>.md. The slug is immutable once created — run records and
+// git branch names reference it. Deleting a project only removes its metadata;
+// the folder on disk is never touched.
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ProjectListEntry {
+    slug: String,
+    name: String,
+    // The single owning tag, without a leading '#'. "" until the user sets one.
+    tag: String,
+    // Absolute path of the project folder. "" until the user picks one.
+    path: String,
+    created: String, // ISO date "2026-08-06"
+}
+
+#[derive(Serialize)]
+struct ProjectData {
+    slug: String,
+    name: String,
+    tag: String,
+    path: String,
+    created: String,
+    // The Markdown notes body (projects/<slug>.md), edited in the detail view.
+    notes: String,
+}
+
+fn projects_dir(dir: &PathBuf) -> PathBuf {
+    let projects = dir.join("projects");
+    let _ = fs::create_dir_all(&projects);
+    projects
+}
+
+fn projects_index_path(dir: &PathBuf) -> PathBuf {
+    projects_dir(dir).join("projects_index.json")
+}
+
+fn project_notes_path(dir: &PathBuf, slug: &str) -> PathBuf {
+    projects_dir(dir).join(format!("{}.md", slug))
+}
+
+/// The project index, sorted alphabetically by name (case-insensitive) with a
+/// slug tie-break — a stable, small set, so no date ordering is needed.
+pub(crate) fn read_projects_index(dir: &PathBuf) -> Vec<ProjectListEntry> {
+    let mut entries: Vec<ProjectListEntry> =
+        fs::read_to_string(projects_index_path(dir))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    entries.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.slug.cmp(&b.slug))
+    });
+    entries
+}
+
+fn write_projects_index(dir: &PathBuf, entries: &[ProjectListEntry]) {
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = fs::write(projects_index_path(dir), json);
+    }
+}
+
+/// Cleans and validates a project tag: trims, strips leading '#', and requires
+/// the same charset as any tag ([A-Za-z0-9_-]+). Returns Err on bad input.
+fn normalize_project_tag(tag: &str) -> Result<String, String> {
+    let t = tag.trim().trim_start_matches('#').trim().to_string();
+    if t.is_empty() {
+        return Ok(t); // clearing the tag is allowed (project just unlinks)
+    }
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("Invalid tag \"{t}\" — letters, digits, _ and - only."));
+    }
+    Ok(t)
+}
+
+#[tauri::command]
+fn get_projects() -> Vec<ProjectListEntry> {
+    read_projects_index(&storage_dir())
+}
+
+#[derive(Serialize)]
+struct AddProjectResult {
+    entries: Vec<ProjectListEntry>,
+    new_slug: String,
+}
+
+#[tauri::command]
+fn add_project(name: String) -> AddProjectResult {
+    let name = name.trim().to_string();
+    let dir = storage_dir();
+    let mut entries = read_projects_index(&dir);
+    if name.is_empty() {
+        return AddProjectResult { entries, new_slug: String::new() };
+    }
+    // Unique slug, mirroring unique_slug for ideas (which is typed to ideas).
+    let base = slugify(&name);
+    let mut slug = base.clone();
+    let mut counter = 1;
+    while entries.iter().any(|e| e.slug == slug) {
+        slug = format!("{}-{}", base, counter);
+        counter += 1;
+    }
+    let created = today().format("%Y-%m-%d").to_string();
+    entries.push(ProjectListEntry {
+        slug: slug.clone(),
+        name,
+        tag: String::new(),
+        path: String::new(),
+        created,
+    });
+    write_projects_index(&dir, &entries);
+    AddProjectResult {
+        entries: read_projects_index(&dir),
+        new_slug: slug,
+    }
+}
+
+#[tauri::command]
+fn get_project(slug: String) -> Option<ProjectData> {
+    let dir = storage_dir();
+    let entry = read_projects_index(&dir)
+        .into_iter()
+        .find(|e| e.slug == slug)?;
+    let notes = fs::read_to_string(project_notes_path(&dir, &slug)).unwrap_or_default();
+    Some(ProjectData {
+        slug: entry.slug,
+        name: entry.name,
+        tag: entry.tag,
+        path: entry.path,
+        created: entry.created,
+        notes: notes.trim_end().to_string(),
+    })
+}
+
+#[derive(Serialize, Debug)]
+struct EditProjectResult {
+    entries: Vec<ProjectListEntry>,
+}
+
+/// Edits a project's name, tag, folder path and/or notes — each field
+/// independent and optional. The tag must stay unique across projects
+/// (case-insensitive): one project per tag, so a tagged item maps to at most
+/// one project. The folder path, when given, must be an existing directory.
+#[tauri::command]
+fn edit_project(
+    slug: String,
+    name: Option<String>,
+    tag: Option<String>,
+    path: Option<String>,
+    notes: Option<String>,
+) -> Result<EditProjectResult, String> {
+    let dir = storage_dir();
+    let mut entries = read_projects_index(&dir);
+    let Some(idx) = entries.iter().position(|e| e.slug == slug) else {
+        return Err("Project not found.".into());
+    };
+
+    if let Some(n) = name {
+        let n = n.trim().to_string();
+        if !n.is_empty() {
+            entries[idx].name = n; // slug is immutable — rename never re-slugs
+        }
+    }
+    if let Some(t) = tag {
+        let t = normalize_project_tag(&t)?;
+        if !t.is_empty() {
+            if let Some(other) = entries
+                .iter()
+                .find(|e| e.slug != slug && e.tag.eq_ignore_ascii_case(&t))
+            {
+                return Err(format!(
+                    "#{} is already linked to \"{}\".",
+                    t, other.name
+                ));
+            }
+        }
+        entries[idx].tag = t;
+    }
+    if let Some(p) = path {
+        let p = p.trim().to_string();
+        if !p.is_empty() && !PathBuf::from(&p).is_dir() {
+            return Err(format!("That folder doesn't exist: {p}"));
+        }
+        entries[idx].path = p;
+    }
+    if let Some(n) = notes {
+        let body = if n.trim().is_empty() {
+            String::new()
+        } else {
+            n.trim_end().to_string() + "\n"
+        };
+        let notes_path = project_notes_path(&dir, &slug);
+        if body.is_empty() {
+            let _ = fs::remove_file(&notes_path);
+        } else {
+            let _ = fs::write(&notes_path, body);
+        }
+    }
+
+    write_projects_index(&dir, &entries);
+    Ok(EditProjectResult {
+        entries: read_projects_index(&dir),
+    })
+}
+
+/// Deletes a project's metadata (index entry + notes file). The linked folder
+/// on disk is deliberately left untouched.
+#[tauri::command]
+fn delete_project(slug: String) -> Vec<ProjectListEntry> {
+    let dir = storage_dir();
+    let mut entries = read_projects_index(&dir);
+    entries.retain(|e| e.slug != slug);
+    write_projects_index(&dir, &entries);
+    let _ = fs::remove_file(project_notes_path(&dir, &slug));
+    read_projects_index(&dir)
 }
 
 // --- storage-location settings ---------------------------------------------
@@ -1391,6 +1650,7 @@ mod storage_tests {
         let date = NaiveDate::from_ymd_opt(2021, 3, 4).unwrap();
         let top = tmp.join("todo_20210304.json");
         let item = TodoItem {
+            id: "test-id".into(),
             checked: false,
             carried: false,
             rolled: false,
@@ -1410,6 +1670,121 @@ mod storage_tests {
         assert!(json_file_for(&tmp, date).starts_with(tmp.join("todos")));
         assert!(json_file_for(&tmp, date).exists());
         assert!(!top.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+
+    // Project CRUD end to end: add creates an index entry with a unique slug;
+    // edit sets tag/path/notes (notes round-tripping through <slug>.md); a tag
+    // already owned by another project is rejected (case-insensitive); a rename
+    // keeps the slug stable; delete removes metadata but never the folder.
+    #[test]
+    fn project_crud_and_tag_uniqueness() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_proj_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        let folder = tmp.join("myrepo");
+        fs::create_dir_all(&folder).unwrap();
+
+        let res = add_project("  My Repo  ".into());
+        assert_eq!(res.entries.len(), 1);
+        assert_eq!(res.new_slug, "my-repo");
+        assert_eq!(res.entries[0].tag, "");
+        // A duplicate name gets a distinct slug.
+        let res2 = add_project("My Repo".into());
+        assert_eq!(res2.new_slug, "my-repo-1");
+
+        // Edit: set tag, path, notes.
+        edit_project(
+            res.new_slug.clone(),
+            None,
+            Some("#work".into()),
+            Some(folder.to_string_lossy().to_string()),
+            Some("# Notes\nhello".into()),
+        )
+        .unwrap();
+        let p = get_project(res.new_slug.clone()).unwrap();
+        assert_eq!(p.tag, "work"); // leading '#' stripped
+        assert_eq!(p.path, folder.to_string_lossy());
+        assert_eq!(p.notes, "# Notes\nhello"); // read back trimmed
+
+        // Tag conflict with the other project (case-insensitive) is rejected.
+        let err = edit_project(res2.new_slug.clone(), None, Some("WORK".into()), None, None)
+            .unwrap_err();
+        assert!(err.contains("already linked"));
+        // Invalid tag charset and nonexistent folder are rejected.
+        assert!(
+            edit_project(res.new_slug.clone(), None, Some("bad tag!".into()), None, None).is_err()
+        );
+        assert!(
+            edit_project(res.new_slug.clone(), None, None, Some("/no/such/dir".into()), None)
+                .is_err()
+        );
+
+        // A rename keeps the slug stable.
+        edit_project(res.new_slug.clone(), Some("Renamed".into()), None, None, None).unwrap();
+        let p = get_project(res.new_slug.clone()).unwrap();
+        assert_eq!(p.name, "Renamed");
+        assert_eq!(p.slug, "my-repo");
+
+        // The notes file lives under projects/; delete removes metadata only.
+        assert!(project_notes_path(&tmp, "my-repo").exists());
+        let left = delete_project(res.new_slug.clone());
+        assert_eq!(left.len(), 1);
+        assert!(!project_notes_path(&tmp, "my-repo").exists());
+        assert!(folder.exists()); // the linked folder is never touched
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+
+    // add_task assigns a stable id; carry-over keeps it; a legacy task with no
+    // id gets one backfilled the first time its day-file is written.
+    #[test]
+    fn todo_ids_are_stable() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_ids_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        let today_iso = today().format("%Y-%m-%d").to_string();
+        add_task(today_iso.clone(), "Task A".into());
+        add_task(today_iso.clone(), "Task B".into());
+        let items = load_day_items(&tmp, today());
+        assert_eq!(items.len(), 2);
+        let id_a = items[0].id.clone();
+        let id_b = items[1].id.clone();
+        assert!(!id_a.is_empty() && !id_b.is_empty() && id_a != id_b);
+
+        // A toggle rewrites the day-file; ids survive.
+        toggle_task(today_iso.clone(), 1);
+        let items = load_day_items(&tmp, today());
+        assert_eq!(items[0].id, id_a);
+        assert_eq!(items[1].id, id_b);
+
+        // Carry-over preserves the id of the unfinished task.
+        let later = today() + chrono::Duration::days(1);
+        ensure_today(&tmp, later);
+        let carried = load_day_items(&tmp, later);
+        assert_eq!(carried.len(), 1); // only the unchecked task carries
+        assert_eq!(carried[0].id, id_a);
+        assert!(carried[0].carried);
+
+        // Legacy .txt migration: ids are backfilled on the carry-over write of
+        // the source (past) file — the one past-day write that is allowed.
+        let old = NaiveDate::from_ymd_opt(2020, 2, 2).unwrap();
+        fs::write(tmp.join("todo_20200202.txt"), "[ ] Ancient\n").unwrap();
+        let before = load_day_items(&tmp, old);
+        assert_eq!(before[0].id, ""); // not backfilled by a read
+        let after_old = NaiveDate::from_ymd_opt(2020, 2, 3).unwrap();
+        ensure_today(&tmp, after_old);
+        assert!(!load_day_items(&tmp, old)[0].id.is_empty());
+        assert!(!load_day_items(&tmp, after_old)[0].id.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
         std::env::remove_var("SUPERTODO_DIR");
@@ -1438,6 +1813,11 @@ pub fn run() {
             get_tagged,
             get_tagged_multi,
             get_tag_colors,
+            get_projects,
+            add_project,
+            get_project,
+            edit_project,
+            delete_project,
             get_storage_info,
             set_storage_dir,
             reset_storage_dir

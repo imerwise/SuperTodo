@@ -157,7 +157,19 @@ body {
      scrollbar (a thin gray bar) just above the composer during navigation. */
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0 14px 8px;
+  /* No bottom padding here: end padding of a flex-column scroller can be
+     dropped from the scrollable area. The ::after spacer below does the job
+     with a real box, which no engine drops. */
+  padding: 0 14px;
+}
+
+/* End-of-scroll spacer: guarantees the bottom gap equals the 14px side gaps
+   in every view (lists, details, settings, run detail…). */
+.content::after {
+  content: "";
+  display: block;
+  flex: 0 0 auto;
+  height: 14px;
 }
 
 .todo-list {
@@ -1454,12 +1466,6 @@ body.composing .content {
   word-break: break-all;
 }
 
-.settings-note {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
 .settings-actions {
   flex: 0 0 auto;
   display: flex;
@@ -1499,4 +1505,99 @@ body.composing .content {
 .settings-btn-ghost:hover {
   color: var(--text);
   filter: none;
+}
+
+/* --- Projects module ---------------------------------------------------- */
+
+/* The folder row in the project detail: truncated path + picker button. */
+.project-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.project-folder-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Linked items in the project detail: compact clickable rows, mirroring the
+   tag-results rows. */
+.project-linked {
+  margin-bottom: 16px;
+}
+
+.project-linked-hint {
+  padding: 8px 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.project-linked-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.project-linked-row:hover {
+  background: var(--line);
+}
+
+.project-linked-row .label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The "Project" jump row at the top of the tag-results view. */
+.project-link-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.project-link-row .label-text {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.project-link-row:hover .label-text {
+  text-decoration: underline;
+}
+
+.detail-desc-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The project detail is a long scrolling page, not a fill layout — keep its
+   notes textarea a fixed, comfortable height, and let the
+   box grow with its content so the bottom padding is honored when scrolled. */
+.project-detail {
+  flex: 0 0 auto;
+  padding-bottom: 14px;
+}
+
+.project-detail .detail-textarea {
+  flex: 0 0 auto;
+  min-height: 160px;
 }

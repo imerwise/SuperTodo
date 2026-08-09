@@ -69,14 +69,15 @@ const EMOJI_CATEGORIES = [
 //   modes:  which modes ("todo", "ideas") this command appears in
 const COMMANDS = [
   { key: "H", label: "Today", action: goToday, modes: ["todo"], hideOnToday: true },
-  { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo"] },
-  { key: "H", label: "Todo", action: () => switchMode("todo"), modes: ["ideas"] },
-  { key: "T", label: "Tags", action: openTagList, modes: ["todo", "ideas"] },
-  { key: "S", label: "Settings", action: openSettings, modes: ["todo", "ideas"] },
+  { key: "I", label: "Ideas", action: () => switchMode("ideas"), modes: ["todo", "projects"] },
+  { key: "H", label: "Todo", action: () => switchMode("todo"), modes: ["ideas", "projects"] },
+  { key: "P", label: "Projects", action: () => switchMode("projects"), modes: ["todo", "ideas"] },
+  { key: "T", label: "Tags", action: openTagList, modes: ["todo", "ideas", "projects"] },
+  { key: "S", label: "Settings", action: openSettings, modes: ["todo", "ideas", "projects"] },
 ];
 
 // View state.
-let mode = "todo"; // "todo" | "ideas"
+let mode = "todo"; // "todo" | "ideas" | "projects"
 let previousMode = "todo"; // the mode active before the current one (for Esc-back)
 let current = null; // YYYY-MM-DD of the viewed day
 let viewIsPast = false; // whether the viewed day is before today
@@ -143,6 +144,10 @@ let ideaDetailReturn = null; // filter context to restore if the detail was open
 let todoDetailIndex = null; // index of the todo shown in its detail view, or null
 let todoDetailReturn = null; // filter context to restore if the detail was opened from a tag view
 let emojiPickerTarget = null; // { slug, callback } for the active picker
+
+// Project state.
+let projects = []; // list of ProjectListEntry
+let projectDetailSlug = null; // slug of the project shown in its detail view
 
 // --- date helpers (local, no timezone drift) ---
 function addDays(iso, n) {
@@ -376,8 +381,8 @@ function attachTagAutocomplete(input) {
 }
 
 function render(data, fx = null) {
-  // The tag/settings views own the screen; ignore stray day/idea renders.
-  if (activeTag || tagListView || settingsView) return;
+  // The tag/settings/projects views own the screen; ignore stray day renders.
+  if (activeTag || tagListView || settingsView || mode === "projects") return;
   if (mode === "ideas") {
     renderIdeas(data);
   } else {
@@ -555,6 +560,7 @@ function renderTodoDetail(index) {
   if (!lastData || !lastData.items || !lastData.items[index]) return;
   const date = lastData.date;
   const item = lastData.items[index];
+  // fresh open starts on Description
   todoDetailIndex = index;
   todoDetailReturn = null; // opened normally; a filter-open sets this afterwards
   pendingDeleteIndex = null;
@@ -583,10 +589,11 @@ function renderTodoDetail(index) {
     const t = titleInput.value.trim();
     if (t && t !== item.text) {
       // Todos don't re-slug, so there's no need to rebuild the view (which would
-      // steal focus); just persist and keep the local copy in sync.
+      // steal focus); just persist. The local copy updates optimistically — a
+      // Use AI click in the same gesture must see the new title.
+      item.text = t;
       invoke("edit_task", { date, index, text: t }).then((data) => {
         lastData = data;
-        item.text = t;
       });
     }
   });
@@ -602,6 +609,7 @@ function renderTodoDetail(index) {
     }
   });
   topRow.appendChild(titleInput);
+
   detail.appendChild(topRow);
 
   // Created date.
@@ -613,11 +621,13 @@ function renderTodoDetail(index) {
   // Tags — the shared token box, persisting via edit_task.
   detail.appendChild(buildTodoTagBox(date, index, item));
 
-  // Description.
+  // The description textarea fills remaining space in the flex chain.
+  const descWrap = document.createElement("div");
+  descWrap.className = "detail-desc-wrap";
   const descLabel = document.createElement("div");
   descLabel.className = "detail-desc-label";
   descLabel.textContent = "Description (Markdown)";
-  detail.appendChild(descLabel);
+  descWrap.appendChild(descLabel);
 
   const textarea = document.createElement("textarea");
   textarea.className = "detail-textarea";
@@ -625,10 +635,11 @@ function renderTodoDetail(index) {
   textarea.spellcheck = false;
   textarea.addEventListener("blur", () => {
     if (textarea.value !== (item.description || "")) {
+      // Update the local copy first, optimistically.
+      item.description = textarea.value;
       invoke("edit_task", { date, index, description: textarea.value }).then(
         (data) => {
           lastData = data;
-          item.description = textarea.value;
         }
       );
     }
@@ -640,7 +651,8 @@ function renderTodoDetail(index) {
       saveAndGoBackTodo(date, index, titleInput, textarea, item);
     }
   });
-  detail.appendChild(textarea);
+  descWrap.appendChild(textarea);
+  detail.appendChild(descWrap);
 
   listEl.appendChild(detail);
   titleInput.focus();
@@ -797,6 +809,7 @@ function renderIdeas(data) {
 
 function renderIdeaDetail(slug) {
   console.log("[ui] renderIdeaDetail: slug=", slug);
+  // fresh open starts on Description
   ideaDetailSlug = slug;
   // NB: ideaDetailReturn is deliberately NOT cleared here — the detail re-renders
   // itself on emoji/title edits (re-slug), and that must not drop a filter
@@ -881,11 +894,13 @@ function renderIdeaDetail(slug) {
     // Tags — a token box: removable chips + an autocompleting add input.
     detail.appendChild(buildIdeaTagBox(idea));
 
-    // Description textarea
+    // The description textarea fills remaining space in the flex chain.
+    const descWrap = document.createElement("div");
+    descWrap.className = "detail-desc-wrap";
     const descLabel = document.createElement("div");
     descLabel.className = "detail-desc-label";
     descLabel.textContent = "Description (Markdown)";
-    detail.appendChild(descLabel);
+    descWrap.appendChild(descLabel);
 
     const textarea = document.createElement("textarea");
     textarea.className = "detail-textarea";
@@ -896,6 +911,7 @@ function renderIdeaDetail(slug) {
     });
     textarea.addEventListener("blur", () => {
       if (textarea.value !== idea.description) {
+        idea.description = textarea.value; // optimistic: Use AI may read it immediately
         editIdea(idea.slug, null, null, textarea.value);
       }
     });
@@ -909,7 +925,8 @@ function renderIdeaDetail(slug) {
         saveAndGoBack(idea.slug, titleInput, textarea, idea);
       }
     });
-    detail.appendChild(textarea);
+    descWrap.appendChild(textarea);
+    detail.appendChild(descWrap);
 
     listEl.appendChild(detail);
     textarea.focus();
@@ -920,15 +937,20 @@ function renderIdeaDetail(slug) {
 // A reusable token box: removable tag chips plus an add-input with autocomplete
 // over the shared vocabulary. `initialTags` seeds it; `onSave(tags)` is awaited
 // after every add/remove to persist the change, so tags survive even if the
-// detail view is closed without touching anything else. Used by both ideas and
-// todos — only the persistence callback differs.
-function buildTagBox(initialTags, onSave) {
+// detail view is closed without touching anything else. Used by ideas, todos
+// and projects — only the persistence callback differs.
+//   opts.single: at most one tag — the input hides while a tag is set, and a
+//                failed save (e.g. the tag is owned by another project) rolls
+//                the box back to the last persisted state.
+//   opts.label:  heading text (default "Tags").
+//   opts.onSaved: called after a successful save (e.g. to refresh linked items).
+function buildTagBox(initialTags, onSave, opts = {}) {
   const wrap = document.createElement("div");
   wrap.className = "detail-tags";
 
   const label = document.createElement("div");
   label.className = "detail-desc-label";
-  label.textContent = "Tags";
+  label.textContent = opts.label || "Tags";
   wrap.appendChild(label);
 
   const box = document.createElement("div");
@@ -936,6 +958,7 @@ function buildTagBox(initialTags, onSave) {
   wrap.appendChild(box);
 
   let tags = (initialTags || []).slice();
+  let lastSaved = tags.slice(); // rollback target when the backend rejects
 
   const input = document.createElement("input");
   input.className = "tag-box-input";
@@ -947,7 +970,14 @@ function buildTagBox(initialTags, onSave) {
   // Persist, then refresh the color map so a newly added tag's chip gets its
   // real ledger color immediately (not the fallback) on the redraw that follows.
   async function save() {
-    await onSave(tags.slice());
+    try {
+      await onSave(tags.slice());
+      lastSaved = tags.slice();
+      if (opts.onSaved) opts.onSaved();
+    } catch (e) {
+      window.alert(typeof e === "string" ? e : "Couldn't save the tag.");
+      tags = lastSaved.slice();
+    }
     await refreshTags();
   }
 
@@ -955,10 +985,11 @@ function buildTagBox(initialTags, onSave) {
     const t = (raw || "").trim().replace(/^#+/, "").trim();
     if (!t || !/^[A-Za-z0-9_-]+$/.test(t)) return;
     if (tags.some((x) => x.toLowerCase() === t.toLowerCase())) return;
-    tags.push(t);
+    if (opts.single) tags = [t];
+    else tags.push(t);
     await save();
     redraw();
-    input.focus();
+    if (!opts.single || tags.length === 0) input.focus();
   }
 
   async function removeTag(t) {
@@ -990,7 +1021,7 @@ function buildTagBox(initialTags, onSave) {
       chip.appendChild(x);
       box.appendChild(chip);
     });
-    box.appendChild(input);
+    if (!opts.single || tags.length === 0) box.appendChild(input);
   }
 
   // Autocomplete dropdown (bare tag names — no '#' needed to search).
@@ -1259,6 +1290,446 @@ async function saveAndGoBack(slug, titleInput, textarea, originalIdea) {
   exitIdeaDetail();
 }
 
+// --- project list view -----------------------------------------------------
+
+function renderProjects(data) {
+  projects = data;
+  projectDetailSlug = null;
+  editingIndex = null;
+
+  weekdayEl.textContent = "";
+  dateEl.textContent = "Projects";
+  modeIndicatorEl.hidden = true;
+  todayBtn.hidden = true;
+  composerEl.style.display = "flex";
+
+  listEl.innerHTML = "";
+
+  if (projects.length === 0) {
+    selectedIndex = null;
+    emptyEl.hidden = false;
+    emptyEl.textContent = "No projects yet — add your first project below.";
+    updateHints();
+    return;
+  }
+  emptyEl.hidden = true;
+
+  if (selectedIndex === null) {
+    selectedIndex = 0;
+  } else if (selectedIndex >= projects.length) {
+    selectedIndex = projects.length - 1;
+  }
+
+  projects.forEach((p, index) => {
+    const li = document.createElement("li");
+    li.className = "todo-item idea-row";
+    li.dataset.index = index;
+    if (index === selectedIndex) li.classList.add("selected");
+    li.addEventListener("click", (e) => {
+      if (pendingDeleteIndex !== null) return;
+      if (e.target.closest("button")) return;
+      renderProjectDetail(p.slug);
+    });
+
+    const icon = document.createElement("span");
+    icon.className = "idea-emoji";
+    icon.textContent = "🗂";
+    li.appendChild(icon);
+
+    const label = document.createElement("span");
+    label.className = "label";
+    const textSpan = document.createElement("span");
+    textSpan.className = "label-text";
+    textSpan.textContent = p.name;
+    label.appendChild(textSpan);
+    const sub = document.createElement("span");
+    sub.className = "idea-date-sub";
+    sub.textContent = p.path || "No folder linked";
+    label.appendChild(sub);
+    if (p.tag) appendTagChips(label, [p.tag]);
+    li.appendChild(label);
+
+    if (pendingDeleteIndex === index) {
+      li.classList.add("pending-delete");
+      const rc = document.createElement("div");
+      rc.className = "row-confirm";
+
+      const text = document.createElement("span");
+      text.className = "row-confirm-text";
+      text.textContent = "Delete?";
+
+      const cancel = document.createElement("button");
+      cancel.className = "rc-btn rc-cancel";
+      cancel.textContent = "No";
+      cancel.addEventListener("click", cancelPendingDelete);
+
+      const confirm = document.createElement("button");
+      confirm.className = "rc-btn rc-delete";
+      confirm.textContent = "Yes";
+      confirm.addEventListener("click", () => deleteProject(index));
+
+      rc.append(text, cancel, confirm);
+      li.appendChild(rc);
+    } else {
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      const del = document.createElement("button");
+      del.className = "icon-btn danger";
+      del.title = "Delete project (folder stays on disk)";
+      del.innerHTML = TRASH_SVG;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        requestDeleteProject(index);
+      });
+
+      actions.appendChild(del);
+      li.appendChild(actions);
+    }
+
+    listEl.appendChild(li);
+  });
+
+  updateHints();
+}
+
+// --- project detail view ---------------------------------------------------
+
+// A full-screen detail for one project, mirroring the idea detail: editable
+// name, the linked folder (native picker), a single-tag box, Markdown notes,
+// and the items linked via the tag. Every field persists on blur/commit via
+// edit_project; Esc saves and returns to the projects list.
+function renderProjectDetail(slug) {
+  projectDetailSlug = slug;
+  pendingDeleteIndex = null;
+  editingIndex = null;
+
+  invoke("get_project", { slug }).then((p) => {
+    if (!p) {
+      switchMode("projects");
+      return;
+    }
+
+    weekdayEl.textContent = "";
+    dateEl.textContent = "Projects";
+    modeIndicatorEl.hidden = true;
+    todayBtn.hidden = true;
+    composerEl.style.display = "none";
+    listEl.innerHTML = "";
+    emptyEl.hidden = true;
+
+    const detail = document.createElement("div");
+    detail.className = "idea-detail project-detail";
+
+    // Name.
+    const topRow = document.createElement("div");
+    topRow.className = "detail-top";
+
+    const titleInput = document.createElement("input");
+    titleInput.className = "detail-title-input";
+    titleInput.type = "text";
+    titleInput.value = p.name;
+    titleInput.addEventListener("blur", () => {
+      const t = titleInput.value.trim();
+      if (t && t !== p.name) {
+        saveProject(p.slug, { name: t }).then((ok) => {
+          if (ok) p.name = t;
+        });
+      }
+    });
+    titleInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        titleInput.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        saveAndGoBackProject(p.slug, titleInput, textarea, p);
+      }
+    });
+    topRow.appendChild(titleInput);
+    detail.appendChild(topRow);
+
+    // Created date.
+    const createdLine = document.createElement("div");
+    createdLine.className = "detail-created";
+    createdLine.textContent = `Created: ${p.created}`;
+    detail.appendChild(createdLine);
+
+    // Linked folder.
+    const folderLabel = document.createElement("div");
+    folderLabel.className = "detail-desc-label";
+    folderLabel.textContent = "Folder";
+    detail.appendChild(folderLabel);
+
+    const folderRow = document.createElement("div");
+    folderRow.className = "project-folder-row";
+    const pathEl = document.createElement("span");
+    pathEl.className = "project-folder-path";
+    pathEl.textContent = p.path || "No folder linked";
+    folderRow.appendChild(pathEl);
+    const choose = document.createElement("button");
+    choose.type = "button";
+    choose.className = "settings-btn";
+    choose.textContent = "Choose…";
+    choose.addEventListener("click", () => chooseProjectFolder(p.slug));
+    folderRow.appendChild(choose);
+    detail.appendChild(folderRow);
+
+    // The owning tag — exactly one; it's what links todos/ideas to this project.
+    detail.appendChild(
+      buildTagBox(
+        p.tag ? [p.tag] : [],
+        async (tags) => {
+          const tag = tags[0] || "";
+          await saveProject(p.slug, { tag }, true);
+          p.tag = tag;
+        },
+        {
+          single: true,
+          label: "Tag",
+          onSaved: () => loadLinkedItems(p.slug),
+        }
+      )
+    );
+
+    // Notes.
+    const notesLabel = document.createElement("div");
+    notesLabel.className = "detail-desc-label";
+    notesLabel.textContent = "Notes (Markdown)";
+    detail.appendChild(notesLabel);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "detail-textarea";
+    textarea.value = p.notes || "";
+    textarea.spellcheck = false;
+    textarea.addEventListener("blur", () => {
+      if (textarea.value !== (p.notes || "")) {
+        saveProject(p.slug, { notes: textarea.value }).then((ok) => {
+          if (ok) p.notes = textarea.value;
+        });
+      }
+    });
+    textarea.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        saveAndGoBackProject(p.slug, titleInput, textarea, p);
+      }
+    });
+    detail.appendChild(textarea);
+
+    // Linked items — every todo and idea carrying the project's tag.
+    const linkedLabel = document.createElement("div");
+    linkedLabel.className = "detail-desc-label";
+    linkedLabel.textContent = "Linked items";
+    detail.appendChild(linkedLabel);
+
+    const linked = document.createElement("div");
+    linked.className = "project-linked";
+    linked.dataset.project = p.slug;
+    detail.appendChild(linked);
+
+    
+
+    listEl.appendChild(detail);
+    titleInput.focus();
+    loadLinkedItems(p.slug);
+    updateHints();
+  });
+}
+
+// Fetch the items linked to a project (via its tag) into the detail's linked
+// section. No-op if the detail has since been closed or switched.
+async function loadLinkedItems(slug) {
+  const container = listEl.querySelector(`.project-linked[data-project="${slug}"]`);
+  if (!container || projectDetailSlug !== slug) return;
+  const p = await invoke("get_project", { slug });
+  if (!p || projectDetailSlug !== slug) return;
+  container.innerHTML = "";
+  if (!p.tag) {
+    const hint = document.createElement("div");
+    hint.className = "project-linked-hint";
+    hint.textContent = "Set a tag above to link todos and ideas to this project.";
+    container.appendChild(hint);
+    return;
+  }
+  const result = await invoke("get_tagged_multi", { tags: [p.tag], matchAll: false });
+  if (projectDetailSlug !== slug) return;
+  container.innerHTML = "";
+  const total = result.todos.length + result.ideas.length;
+  if (total === 0) {
+    const hint = document.createElement("div");
+    hint.className = "project-linked-hint";
+    hint.textContent = `Nothing tagged "${p.tag}" yet.`;
+    container.appendChild(hint);
+    return;
+  }
+  result.todos.forEach((t) => {
+    const row = document.createElement("div");
+    row.className = "project-linked-row";
+    const date = document.createElement("span");
+    date.className = "tag-result-date";
+    date.textContent = t.date;
+    row.appendChild(date);
+    const label = document.createElement("span");
+    label.className = "label";
+    fillTodoLabel(label, t.text, t.tags);
+    row.appendChild(label);
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".tag-chip")) return;
+      openTodoFromProject(t.date, t.index);
+    });
+    container.appendChild(row);
+  });
+  result.ideas.forEach((idea) => {
+    const row = document.createElement("div");
+    row.className = "project-linked-row";
+    const em = document.createElement("span");
+    em.className = "idea-emoji";
+    em.textContent = idea.emoji;
+    row.appendChild(em);
+    const label = document.createElement("span");
+    label.className = "label";
+    const txt = document.createElement("span");
+    txt.className = "label-text";
+    txt.textContent = idea.title;
+    label.appendChild(txt);
+    appendTagChips(label, idea.tags);
+    row.appendChild(label);
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".tag-chip")) return;
+      openIdeaFromProject(idea.slug);
+    });
+    container.appendChild(row);
+  });
+}
+
+// Persist project fields; on a backend rejection (tag conflict, bad folder)
+// show the message and report failure so the caller can keep its old value.
+async function saveProject(slug, fields, rethrow = false) {
+  try {
+    const res = await invoke("edit_project", { slug, ...fields });
+    projects = res.entries;
+    return true;
+  } catch (e) {
+    window.alert(typeof e === "string" ? e : "Couldn't save the project.");
+    if (rethrow) throw e;
+    return false;
+  }
+}
+
+// Native folder picker → persist the project folder. The folder itself is only
+// ever referenced, never moved or copied.
+async function chooseProjectFolder(slug) {
+  let picked;
+  try {
+    const p = await invoke("get_project", { slug });
+    picked = await invoke("plugin:dialog|open", {
+      options: {
+        directory: true,
+        multiple: false,
+        title: "Choose the project folder",
+        defaultPath: (p && p.path) || undefined,
+      },
+    });
+  } catch (e) {
+    console.log("[ui] project folder picker failed", e);
+    return;
+  }
+  if (!picked || typeof picked !== "string") return; // cancelled
+  if (await saveProject(slug, { path: picked })) {
+    if (projectDetailSlug === slug) renderProjectDetail(slug);
+  }
+}
+
+// Persist pending name/notes edits, then return to the projects list.
+async function saveAndGoBackProject(slug, titleInput, textarea, p) {
+  const newName = titleInput.value.trim();
+  const newNotes = textarea.value;
+  if (newName && newName !== p.name) await saveProject(slug, { name: newName });
+  if (newNotes !== (p.notes || "")) await saveProject(slug, { notes: newNotes });
+  exitProjectDetail();
+}
+
+function exitProjectDetail() {
+  projectDetailSlug = null;
+  switchMode("projects");
+}
+
+// --- project actions -------------------------------------------------------
+
+async function addProject(text) {
+  if (!text) return;
+  const result = await invoke("add_project", { name: text });
+  projects = result.entries;
+  const newIndex = projects.findIndex((e) => e.slug === result.new_slug);
+  selectedIndex = newIndex >= 0 ? newIndex : 0;
+  renderProjectDetail(result.new_slug);
+}
+
+async function deleteProject(index) {
+  const p = projects[index];
+  if (!p) return;
+  projects = await invoke("delete_project", { slug: p.slug });
+  pendingDeleteIndex = null;
+  selectedIndex = null;
+  renderProjects(projects);
+}
+
+function requestDeleteProject(index) {
+  selectedIndex = index;
+  pendingDeleteIndex = index;
+  renderProjects(projects);
+}
+
+// Open a project from anywhere outside the projects module (e.g. the Project
+// row in the tag-results view).
+function openProjectFromOutside(slug) {
+  mode = "projects";
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  inputEl.placeholder = "Add a project…";
+  projectDetailSlug = null;
+  renderProjectDetail(slug);
+}
+
+// Leave the project detail and open a linked task / idea. Simple one-way
+// navigation for now — Esc from the item returns to its own module, and ⌥P
+// brings the project back.
+async function openTodoFromProject(date, todoIndex) {
+  mode = "todo";
+  projectDetailSlug = null;
+  editingIndex = null;
+  pendingDeleteIndex = null;
+  prevBtn.style.display = "";
+  nextBtn.style.display = "";
+  inputEl.placeholder = "Add a task…";
+  const data = await invoke("get_day", { date });
+  lastData = data;
+  current = data.date;
+  viewIsPast = data.is_past;
+  if (!data.is_past && todoIndex >= 0 && todoIndex < data.items.length) {
+    selectedIndex = todoIndex;
+    renderTodoDetail(todoIndex);
+  } else {
+    render(data);
+  }
+}
+
+async function openIdeaFromProject(slug) {
+  mode = "ideas";
+  projectDetailSlug = null;
+  prevBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  inputEl.placeholder = "Add an idea…";
+  ideas = await invoke("get_ideas");
+  renderIdeaDetail(slug);
+}
+
+
+
 // --- mode switching -------------------------------------------------------
 
 async function switchMode(newMode) {
@@ -1273,6 +1744,7 @@ async function switchMode(newMode) {
   ideaDetailReturn = null;
   todoDetailIndex = null;
   todoDetailReturn = null;
+  projectDetailSlug = null;
   inputEl.blur();
 
   // If coming back from idea detail, re-select the source idea
@@ -1284,7 +1756,15 @@ async function switchMode(newMode) {
 
   mode = newMode;
 
-  if (mode === "ideas") {
+  if (mode === "projects") {
+    prevBtn.style.display = "none";
+    nextBtn.style.display = "none";
+    modeIndicatorEl.hidden = true;
+    weekdayEl.textContent = "";
+    inputEl.placeholder = "Add a project…";
+    projects = await invoke("get_projects");
+    renderProjects(projects);
+  } else if (mode === "ideas") {
     prevBtn.style.display = "none";
     nextBtn.style.display = "none";
     modeIndicatorEl.hidden = true;
@@ -1465,9 +1945,44 @@ function updateHints(force = null) {
     return;
   }
 
+  // Project detail view hints
+  if (mode === "projects" && projectDetailSlug) {
+    statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
   // Idea detail view hints
   if (mode === "ideas" && ideaDetailSlug) {
     statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Esc", "Back"]])}</span>`;
+    measureHintTicker();
+    return;
+  }
+
+  // Projects list view hints
+  if (mode === "projects") {
+    const n = projects.length;
+    if (pendingDeleteIndex !== null) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["⌫", "Delete"], ["Esc", "Cancel"]])}</span>`;
+      measureHintTicker();
+      return;
+    }
+    if (document.activeElement === inputEl) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["⏎", "Add"], ["Esc", "Clear"]])}</span>`;
+      measureHintTicker();
+      return;
+    }
+    if (n === 0) {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([["Type", "to add"], ["Esc", "Back"], ["⌥", "Commands"]])}</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="statusbar-track">${hintHTML([
+        ["↑↓", "Move"],
+        ["⏎", "Open"],
+        ["⌫", "Delete"],
+        ["Esc", "Back"],
+        ["⌥", "Commands"],
+      ])}</span>`;
+    }
     measureHintTicker();
     return;
   }
@@ -1660,6 +2175,7 @@ async function openTagList() {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  projectDetailSlug = null;
   inputEl.blur();
   renderTagList();
 }
@@ -1687,7 +2203,15 @@ async function openTaggedResults(tags, matchAll) {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  projectDetailSlug = null;
   inputEl.blur();
+  // Refresh the project cache so the results view can show a "Project" row when
+  // one of the active tags is owned by a project.
+  try {
+    projects = await invoke("get_projects");
+  } catch (e) {
+    console.log("[ui] get_projects failed", e);
+  }
   await refetchTagged();
 }
 
@@ -1723,17 +2247,25 @@ function exitTagView() {
   exitTagFlow();
 }
 
-// Restore whatever screen the tag flow was entered from.
-function exitTagFlow() {
-  const ret = tagFilterReturn || { mode: "todo", current: null };
+// Reset the tag-flow state without navigating — for jumps that route somewhere
+// other than the flow's origin (e.g. the Project row opening a project).
+function exitTagFlowSilently() {
   activeTag = null;
   activeTags = [];
   selectedTags = [];
   tagListView = false;
   filterCameFromList = false;
   tagFilterReturn = null;
+}
+
+// Restore whatever screen the tag flow was entered from.
+function exitTagFlow() {
+  const ret = tagFilterReturn || { mode: "todo", current: null };
+  exitTagFlowSilently();
   if (ret.mode === "ideas") {
     switchMode("ideas");
+  } else if (ret.mode === "projects") {
+    switchMode("projects");
   } else {
     mode = "todo";
     prevBtn.style.display = "";
@@ -1961,10 +2493,11 @@ function openSettings() {
   pendingDeleteIndex = null;
   selectedIndex = null;
   ideaDetailSlug = null;
+  projectDetailSlug = null;
   settingsIndex = 0;
   inputEl.blur();
   renderSettings();
-  // Storage info comes from the backend; refresh and re-render when it lands.
+  // Storage settings come from the backend; refresh and re-render when they land.
   refreshStorageInfo();
 }
 
@@ -2024,6 +2557,8 @@ function exitSettings() {
   settingsReturn = null;
   if (ret.mode === "ideas") {
     switchMode("ideas");
+  } else if (ret.mode === "projects") {
+    switchMode("projects");
   } else {
     mode = "todo";
     prevBtn.style.display = "";
@@ -2078,7 +2613,11 @@ function addSettingsRow(el, { onEnter, disabled = false } = {}) {
     if (disabled) return;
     settingsIndex = idx;
     highlightSettingsRow();
-    if (e.target.closest(".settings-seg")) return; // seg button handles itself
+    // Controls with their own click handling (seg buttons, self-action buttons,
+    // links, inputs) must not also trigger the row's action — e.g. a click on a
+    // "Cancel" button would otherwise ALSO run onEnter (double action), and a
+    // click on the device-code link would cancel the pending sign-in.
+    if (e.target.closest(".settings-seg, .self-action, .settings-link, input")) return;
     if (onEnter) onEnter();
   });
   listEl.appendChild(el);
@@ -2289,6 +2828,39 @@ function renderTagFilter(result) {
   banner.appendChild(clr);
   listEl.appendChild(banner);
 
+  // When one of the active tags is owned by a project, offer a jump to it.
+  const owner = projects.find(
+    (p) =>
+      p.tag &&
+      activeTags.some((t) => t.toLowerCase() === p.tag.toLowerCase())
+  );
+  if (owner) {
+    const prow = document.createElement("li");
+    prow.className = "project-link-row";
+    const icon = document.createElement("span");
+    icon.className = "idea-emoji";
+    icon.textContent = "🗂";
+    prow.appendChild(icon);
+    const plabel = document.createElement("span");
+    plabel.className = "label";
+    const pname = document.createElement("span");
+    pname.className = "label-text";
+    pname.textContent = owner.name;
+    plabel.appendChild(pname);
+    const psub = document.createElement("span");
+    psub.className = "idea-date-sub";
+    psub.textContent = owner.path || "Project";
+    plabel.appendChild(psub);
+    prow.appendChild(plabel);
+    prow.title = "Open project";
+    prow.addEventListener("click", () => {
+      const slug = owner.slug;
+      exitTagFlowSilently();
+      openProjectFromOutside(slug);
+    });
+    listEl.appendChild(prow);
+  }
+
   // Rebuild the row map (one entry per selectable result, in DOM order) so the
   // keyboard cursor and Enter know what each row opens.
   tagResultRows = [];
@@ -2422,6 +2994,8 @@ function cancelPendingDelete() {
   pendingDeleteIndex = null;
   if (mode === "ideas") {
     renderIdeas(ideas);
+  } else if (mode === "projects") {
+    renderProjects(projects);
   } else {
     render(lastData);
   }
@@ -2432,6 +3006,8 @@ function confirmPendingDelete() {
   const idx = pendingDeleteIndex;
   if (mode === "ideas") {
     deleteIdea(idx);
+  } else if (mode === "projects") {
+    deleteProject(idx);
   } else {
     remove(idx);
   }
@@ -2505,6 +3081,9 @@ async function add() {
   if (mode === "ideas") {
     inputEl.value = "";
     await addIdea(text);
+  } else if (mode === "projects") {
+    inputEl.value = "";
+    await addProject(text);
   } else {
     inputEl.value = "";
     editingIndex = null;
@@ -2558,6 +3137,16 @@ todayBtn.addEventListener("click", goToday);
 document.addEventListener("keydown", (e) => {
   // Settings view: Space/Enter toggles the tag-order setting, Escape leaves.
   if (settingsView) {
+    // A focused settings input (API key, models) handles its own keys; only
+    // Escape is intercepted here to drop focus back to the cursor.
+    const active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        active.blur();
+      }
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       exitSettings();
@@ -2778,6 +3367,71 @@ document.addEventListener("keydown", (e) => {
       }
     }
     // Start typing to add an idea
+    if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
+    if (inField) return;
+    e.preventDefault();
+    inputEl.value += e.key;
+    inputEl.focus();
+    return;
+  }
+
+  // --- Project detail view keyboard ---
+  if (mode === "projects" && projectDetailSlug) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      // Name/notes fields save + close on their own Esc (and stop propagation).
+      // Reaching here means focus was elsewhere (tag box, folder button), where
+      // each change has already persisted — just close.
+      exitProjectDetail();
+    }
+    return;
+  }
+
+  // --- Projects list view keyboard ---
+  if (mode === "projects") {
+    const n = projects.length;
+    if (inField && tag === "INPUT") {
+      // In the add input — handled by its own events
+      return;
+    }
+    // Esc backs out of the Projects module to the previous one.
+    if (e.key === "Escape") {
+      e.preventDefault();
+      switchMode(previousMode === "projects" ? "todo" : previousMode);
+      return;
+    }
+    if (n > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
+        applySelection();
+        updateHints();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selectedIndex =
+          selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
+        applySelection();
+        updateHints();
+        return;
+      }
+      if (e.key === "Enter" && selectedIndex !== null) {
+        e.preventDefault();
+        const p = projects[selectedIndex];
+        if (p) renderProjectDetail(p.slug);
+        return;
+      }
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        selectedIndex !== null
+      ) {
+        e.preventDefault();
+        requestDeleteProject(selectedIndex);
+        return;
+      }
+    }
+    // Start typing to add a project
     if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
     if (inField) return;
     e.preventDefault();
