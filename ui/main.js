@@ -1726,8 +1726,10 @@ async function openIdeaFromProject(slug) {
 
 async function switchMode(newMode) {
   console.log("[ui] switchMode: from", mode, "to", newMode);
-  // Remember where we came from so Esc can return to the previous module.
-  if (newMode !== mode) previousMode = mode;
+  if (newMode !== mode) {
+    sfx.enter();
+    previousMode = mode;
+  }
   hideEmojiPicker();
   editingIndex = null;
   pendingDeleteIndex = null;
@@ -2158,6 +2160,7 @@ async function goTo(iso, dir = 0) {
 
 // Open the browsable Tags view — the entry point for filtering by tag.
 async function openTagList() {
+  sfx.enter();
   hideEmojiPicker();
   if (!tagFilterReturn) tagFilterReturn = { mode, current };
   await refreshTags();
@@ -2184,6 +2187,7 @@ async function openTagFilter(tag) {
 async function openTaggedResults(tags, matchAll) {
   const list = (tags || []).filter(Boolean);
   if (!list.length) return;
+  sfx.enter();
   hideEmojiPicker();
   if (!tagFilterReturn) tagFilterReturn = { mode, current };
   filterCameFromList = tagListView;
@@ -2474,6 +2478,7 @@ function renderTagList() {
 // --- settings view --------------------------------------------------------
 
 function openSettings() {
+  sfx.enter();
   hideEmojiPicker();
   settingsReturn = { mode, current };
   settingsView = true;
