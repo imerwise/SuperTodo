@@ -33,11 +33,15 @@ function play(ops) {
 }
 
 const sfx = {
+  enabled: true,
+
   nav() {
+    if (!this.enabled) return;
     play({ freq: 660, dur: 0.05, vol: 0.08, type: "square" });
   },
 
   enter() {
+    if (!this.enabled) return;
     const now = ctx.currentTime;
     const dur = 0.12;
     [523, 784].forEach((f, i) => {
@@ -55,10 +59,12 @@ const sfx = {
   },
 
   toggle() {
+    if (!this.enabled) return;
     play({ freq: 880, dur: 0.04, vol: 0.06, type: "triangle" });
   },
 
   escape() {
+    if (!this.enabled) return;
     play({ freq: 440, freqEnd: 220, dur: 0.15, vol: 0.08, type: "square" });
   },
 };

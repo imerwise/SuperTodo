@@ -104,8 +104,8 @@ let settingsView = false; // when true, the app shows the Settings view
 let settingsReturn = null; // { mode, current } to restore when Settings is closed
 const SETTINGS_KEY = "supertodo.settings";
 let settings = {
-  // Default on first launch: input order. Users can switch to alphabetical in Settings.
-  sortTagsAlpha: false, // sort tag chips alphabetically (vs. input order) on rows
+  sortTagsAlpha: false,
+  sfxEnabled: true,
 };
 function loadSettings() {
   try {
@@ -114,6 +114,7 @@ function loadSettings() {
   } catch (e) {
     console.log("[ui] loadSettings failed", e);
   }
+  sfx.enabled = settings.sfxEnabled;
 }
 function saveSettings() {
   try {
@@ -2572,6 +2573,14 @@ function setTagSort(alpha) {
   renderSettings();
 }
 
+function setSfxEnabled(enabled) {
+  if (settings.sfxEnabled === enabled) return;
+  settings.sfxEnabled = enabled;
+  sfx.enabled = enabled;
+  saveSettings();
+  renderSettings();
+}
+
 function renderSettings() {
   weekdayEl.textContent = "";
   dateEl.textContent = "Settings";
@@ -2584,6 +2593,7 @@ function renderSettings() {
   emptyEl.hidden = true;
   settingsRows = [];
 
+  buildSfxToggleRow();
   buildTagOrderRow();
   buildStorageRows();
 
@@ -2666,6 +2676,38 @@ function activateSettings() {
 }
 
 // A toggle row: Enter flips it; the segmented control also takes direct clicks.
+function buildSfxToggleRow() {
+  const row = document.createElement("li");
+  row.className = "settings-row";
+
+  const info = document.createElement("div");
+  info.className = "settings-info";
+  const title = document.createElement("div");
+  title.className = "settings-title";
+  title.textContent = "Sound effects";
+  const desc = document.createElement("div");
+  desc.className = "settings-desc";
+  desc.textContent = "8-bit sounds for navigation and actions.";
+  info.append(title, desc);
+  row.appendChild(info);
+
+  const seg = document.createElement("div");
+  seg.className = "settings-seg";
+  const mk = (label, enabled) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.tabIndex = -1;
+    b.className = "seg-btn" + (settings.sfxEnabled === enabled ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => setSfxEnabled(enabled));
+    return b;
+  };
+  seg.append(mk("On", true), mk("Off", false));
+  row.appendChild(seg);
+
+  addSettingsRow(row, { onEnter: () => setSfxEnabled(!settings.sfxEnabled) });
+}
+
 function buildTagOrderRow() {
   const row = document.createElement("li");
   row.className = "settings-row";
