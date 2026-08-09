@@ -604,6 +604,7 @@ function renderTodoDetail(index) {
       titleInput.blur();
     } else if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       e.stopPropagation();
       saveAndGoBackTodo(date, index, titleInput, textarea, item);
     }
@@ -612,16 +613,13 @@ function renderTodoDetail(index) {
 
   detail.appendChild(topRow);
 
-  // Created date.
   const createdLine = document.createElement("div");
   createdLine.className = "detail-created";
   createdLine.textContent = item.created ? `Created: ${item.created}` : "";
   detail.appendChild(createdLine);
 
-  // Tags — the shared token box, persisting via edit_task.
   detail.appendChild(buildTodoTagBox(date, index, item));
 
-  // The description textarea fills remaining space in the flex chain.
   const descWrap = document.createElement("div");
   descWrap.className = "detail-desc-wrap";
   const descLabel = document.createElement("div");
@@ -635,7 +633,6 @@ function renderTodoDetail(index) {
   textarea.spellcheck = false;
   textarea.addEventListener("blur", () => {
     if (textarea.value !== (item.description || "")) {
-      // Update the local copy first, optimistically.
       item.description = textarea.value;
       invoke("edit_task", { date, index, description: textarea.value }).then(
         (data) => {
@@ -647,6 +644,7 @@ function renderTodoDetail(index) {
   textarea.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       e.stopPropagation();
       saveAndGoBackTodo(date, index, titleInput, textarea, item);
     }
@@ -878,6 +876,7 @@ function renderIdeaDetail(slug) {
         titleInput.blur();
       } else if (e.key === "Escape") {
         e.preventDefault();
+        sfx.escape();
         saveAndGoBack(idea.slug, titleInput, textarea, idea);
       }
     });
@@ -885,16 +884,13 @@ function renderIdeaDetail(slug) {
 
     detail.appendChild(topRow);
 
-    // Created date
     const createdLine = document.createElement("div");
     createdLine.className = "detail-created";
     createdLine.textContent = `Created: ${idea.created}`;
     detail.appendChild(createdLine);
 
-    // Tags — a token box: removable chips + an autocompleting add input.
     detail.appendChild(buildIdeaTagBox(idea));
 
-    // The description textarea fills remaining space in the flex chain.
     const descWrap = document.createElement("div");
     descWrap.className = "detail-desc-wrap";
     const descLabel = document.createElement("div");
@@ -911,16 +907,14 @@ function renderIdeaDetail(slug) {
     });
     textarea.addEventListener("blur", () => {
       if (textarea.value !== idea.description) {
-        idea.description = textarea.value; // optimistic: Use AI may read it immediately
+        idea.description = textarea.value;
         editIdea(idea.slug, null, null, textarea.value);
       }
     });
     textarea.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        // Stop the global idea-detail Esc handler from also firing — otherwise
-        // exitIdeaDetail runs twice and the second call, with the filter return
-        // already consumed, falls back to the ideas list / home.
+        sfx.escape();
         e.stopPropagation();
         saveAndGoBack(idea.slug, titleInput, textarea, idea);
       }
@@ -1444,6 +1438,7 @@ function renderProjectDetail(slug) {
         titleInput.blur();
       } else if (e.key === "Escape") {
         e.preventDefault();
+        sfx.escape();
         e.stopPropagation();
         saveAndGoBackProject(p.slug, titleInput, textarea, p);
       }
@@ -1451,13 +1446,11 @@ function renderProjectDetail(slug) {
     topRow.appendChild(titleInput);
     detail.appendChild(topRow);
 
-    // Created date.
     const createdLine = document.createElement("div");
     createdLine.className = "detail-created";
     createdLine.textContent = `Created: ${p.created}`;
     detail.appendChild(createdLine);
 
-    // Linked folder.
     const folderLabel = document.createElement("div");
     folderLabel.className = "detail-desc-label";
     folderLabel.textContent = "Folder";
@@ -1477,7 +1470,6 @@ function renderProjectDetail(slug) {
     folderRow.appendChild(choose);
     detail.appendChild(folderRow);
 
-    // The owning tag — exactly one; it's what links todos/ideas to this project.
     detail.appendChild(
       buildTagBox(
         p.tag ? [p.tag] : [],
@@ -1494,7 +1486,6 @@ function renderProjectDetail(slug) {
       )
     );
 
-    // Notes.
     const notesLabel = document.createElement("div");
     notesLabel.className = "detail-desc-label";
     notesLabel.textContent = "Notes (Markdown)";
@@ -1514,6 +1505,7 @@ function renderProjectDetail(slug) {
     textarea.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        sfx.escape();
         e.stopPropagation();
         saveAndGoBackProject(p.slug, titleInput, textarea, p);
       }
@@ -3109,9 +3101,10 @@ async function add() {
 // --- events ---
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
+    sfx.enter();
     add();
   } else if (e.key === "Escape") {
-    // Cancel: clear the text and drop focus.
+    sfx.escape();
     e.stopPropagation();
     inputEl.value = "";
     inputEl.blur();
@@ -3143,21 +3136,26 @@ document.addEventListener("keydown", (e) => {
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
       if (e.key === "Escape") {
         e.preventDefault();
+        sfx.escape();
         active.blur();
       }
       return;
     }
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       exitSettings();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
+      sfx.nav();
       moveSettings(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      sfx.nav();
       moveSettings(-1);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
+      sfx.enter();
       activateSettings();
     }
     return;
@@ -3172,6 +3170,7 @@ document.addEventListener("keydown", (e) => {
     const n = items.length;
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       if (selectedTags.length) {
         selectedTags = [];
         renderTagList();
@@ -3180,18 +3179,22 @@ document.addEventListener("keydown", (e) => {
       }
     } else if (n > 0 && e.key === "ArrowDown") {
       e.preventDefault();
+      sfx.nav();
       selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
       applySelection();
     } else if (n > 0 && e.key === "ArrowUp") {
       e.preventDefault();
+      sfx.nav();
       selectedIndex =
         selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
       applySelection();
     } else if (n > 0 && e.key === " " && selectedIndex !== null) {
       e.preventDefault();
+      sfx.toggle();
       toggleTagSelection(items[selectedIndex]);
     } else if (n > 0 && e.key === "Enter") {
       e.preventDefault();
+      sfx.enter();
       if (selectedTags.length) showSelectedTags();
       else if (selectedIndex !== null) openTagFilter(items[selectedIndex]);
     }
@@ -3206,21 +3209,25 @@ document.addEventListener("keydown", (e) => {
     const n = tagResultRows.length;
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       clearTagFilter();
     } else if (e.key === "Tab" && activeTags.length > 1) {
       e.preventDefault();
       setTagMatchAll(!tagMatchAll);
     } else if (n > 0 && e.key === "ArrowDown") {
       e.preventDefault();
+      sfx.nav();
       selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
       applySelection();
     } else if (n > 0 && e.key === "ArrowUp") {
       e.preventDefault();
+      sfx.nav();
       selectedIndex =
         selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
       applySelection();
     } else if (n > 0 && e.key === "Enter" && selectedIndex !== null) {
       e.preventDefault();
+      sfx.enter();
       openTagResult(selectedIndex);
     }
     return;
@@ -3244,6 +3251,7 @@ document.addEventListener("keydown", (e) => {
   // Escape in idea detail -> back to idea list
   if (mode === "ideas" && ideaDetailSlug && e.key === "Escape") {
     e.preventDefault();
+    sfx.escape();
     console.log("[ui] key: Escape in idea detail, going back to ideas list");
     switchMode("ideas");
     return;
@@ -3255,9 +3263,11 @@ document.addEventListener("keydown", (e) => {
   if (pendingDeleteIndex !== null) {
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
+      sfx.enter();
       confirmPendingDelete();
     } else if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       cancelPendingDelete();
     }
     return;
@@ -3289,6 +3299,7 @@ document.addEventListener("keydown", (e) => {
   if (mode === "ideas" && ideaDetailSlug) {
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       // Grab current values from the DOM before saving
       const ti = document.querySelector(".detail-title-input");
       const ta = document.querySelector(".detail-textarea");
@@ -3312,9 +3323,7 @@ document.addEventListener("keydown", (e) => {
   if (mode === "todo" && todoDetailIndex !== null) {
     if (e.key === "Escape") {
       e.preventDefault();
-      // The title/description fields save + close on their own Esc (and stop
-      // propagation). Reaching here means focus was elsewhere (e.g. the tag
-      // box), where each field's blur has already persisted — just close.
+      sfx.escape();
       closeTodoDetail(todoDetailIndex);
     }
     return;
@@ -3324,18 +3333,18 @@ document.addEventListener("keydown", (e) => {
   if (mode === "ideas") {
     const n = ideas.length;
     if (inField && tag === "INPUT") {
-      // In the add input — handled by its own events
       return;
     }
-    // Esc backs out of the Ideas module to the previous one (normally Todo).
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       switchMode(previousMode === "ideas" ? "todo" : previousMode);
       return;
     }
     if (n > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        sfx.nav();
         selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
         applySelection();
         updateHints();
@@ -3343,6 +3352,7 @@ document.addEventListener("keydown", (e) => {
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
+        sfx.nav();
         selectedIndex =
           selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
         applySelection();
@@ -3351,6 +3361,7 @@ document.addEventListener("keydown", (e) => {
       }
       if (e.key === "Enter" && selectedIndex !== null) {
         e.preventDefault();
+        sfx.enter();
         const idea = ideas[selectedIndex];
         console.log("[ui] key: Enter on idea index=", selectedIndex, "slug=", idea && idea.slug);
         if (idea) renderIdeaDetail(idea.slug);
@@ -3366,7 +3377,6 @@ document.addEventListener("keydown", (e) => {
         return;
       }
     }
-    // Start typing to add an idea
     if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
     if (inField) return;
     e.preventDefault();
@@ -3379,6 +3389,7 @@ document.addEventListener("keydown", (e) => {
   if (mode === "projects" && projectDetailSlug) {
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       // Name/notes fields save + close on their own Esc (and stop propagation).
       // Reaching here means focus was elsewhere (tag box, folder button), where
       // each change has already persisted — just close.
@@ -3391,18 +3402,18 @@ document.addEventListener("keydown", (e) => {
   if (mode === "projects") {
     const n = projects.length;
     if (inField && tag === "INPUT") {
-      // In the add input — handled by its own events
       return;
     }
-    // Esc backs out of the Projects module to the previous one.
     if (e.key === "Escape") {
       e.preventDefault();
+      sfx.escape();
       switchMode(previousMode === "projects" ? "todo" : previousMode);
       return;
     }
     if (n > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        sfx.nav();
         selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
         applySelection();
         updateHints();
@@ -3410,6 +3421,7 @@ document.addEventListener("keydown", (e) => {
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
+        sfx.nav();
         selectedIndex =
           selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
         applySelection();
@@ -3418,6 +3430,7 @@ document.addEventListener("keydown", (e) => {
       }
       if (e.key === "Enter" && selectedIndex !== null) {
         e.preventDefault();
+        sfx.enter();
         const p = projects[selectedIndex];
         if (p) renderProjectDetail(p.slug);
         return;
@@ -3431,7 +3444,6 @@ document.addEventListener("keydown", (e) => {
         return;
       }
     }
-    // Start typing to add a project
     if (e.metaKey || e.ctrlKey || e.key.length !== 1) return;
     if (inField) return;
     e.preventDefault();
@@ -3463,43 +3475,49 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
       e.preventDefault();
+      sfx.nav();
       const back = e.key === "ArrowLeft";
       if (current) goTo(addDays(current, back ? -7 : 7), back ? -1 : 1);
       return;
     }
-    // Left / right change the viewed day.
     if (e.key === "ArrowLeft") {
       e.preventDefault();
+      sfx.nav();
       if (current) goTo(addDays(current, -1), -1);
       return;
     }
     if (e.key === "ArrowRight") {
       e.preventDefault();
+      sfx.nav();
       if (current) goTo(addDays(current, 1), 1);
       return;
     }
     if (e.key === "ArrowDown" && n > 0) {
       e.preventDefault();
+      sfx.nav();
       selectedIndex = selectedIndex === null ? 0 : (selectedIndex + 1) % n;
       applySelection();
       return;
     }
     if (e.key === "ArrowUp" && n > 0) {
       e.preventDefault();
+      sfx.nav();
       selectedIndex =
         selectedIndex === null ? n - 1 : (selectedIndex - 1 + n) % n;
       applySelection();
       return;
     }
     if (e.key === " " && selectedIndex !== null) {
-      // Space toggles the highlighted task done / not-done (never types into
-      // the add box during list navigation). Past days are review-only.
       e.preventDefault();
-      if (!viewIsPast) toggle(selectedIndex);
+      if (!viewIsPast) {
+        sfx.toggle();
+        toggle(selectedIndex);
+      }
       return;
     }
     if (e.key === "Enter" && selectedIndex !== null) {
       e.preventDefault();
+      sfx.enter();
       if (!viewIsPast) renderTodoDetail(selectedIndex);
       return;
     }
