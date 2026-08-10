@@ -1725,10 +1725,10 @@ async function openIdeaFromProject(slug) {
 
 // --- mode switching -------------------------------------------------------
 
-async function switchMode(newMode) {
+async function switchMode(newMode, silent) {
   console.log("[ui] switchMode: from", mode, "to", newMode);
   if (newMode !== mode) {
-    sfx.enter();
+    if (!silent) sfx.enter();
     previousMode = mode;
   }
   hideEmojiPicker();
@@ -2260,9 +2260,9 @@ function exitTagFlow() {
   const ret = tagFilterReturn || { mode: "todo", current: null };
   exitTagFlowSilently();
   if (ret.mode === "ideas") {
-    switchMode("ideas");
+    switchMode("ideas", true);
   } else if (ret.mode === "projects") {
-    switchMode("projects");
+    switchMode("projects", true);
   } else {
     mode = "todo";
     prevBtn.style.display = "";
@@ -3385,7 +3385,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       sfx.escape();
-      switchMode(previousMode === "ideas" ? "todo" : previousMode);
+      switchMode(previousMode === "ideas" ? "todo" : previousMode, true);
       return;
     }
     if (n > 0) {
@@ -3454,7 +3454,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       sfx.escape();
-      switchMode(previousMode === "projects" ? "todo" : previousMode);
+      switchMode(previousMode === "projects" ? "todo" : previousMode, true);
       return;
     }
     if (n > 0) {
