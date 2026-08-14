@@ -65,6 +65,19 @@ const sfx = {
 
   escape() {
     if (!this.enabled) return;
-    play({ freq: 440, freqEnd: 220, dur: 0.15, vol: 0.08, type: "square" });
+    const now = ctx.currentTime;
+    const dur = 0.12;
+    [784, 523].forEach((f, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "square";
+      o.frequency.setValueAtTime(f, now + i * 0.05);
+      g.gain.setValueAtTime(0.1, now + i * 0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.05 + dur);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(now + i * 0.05);
+      o.stop(now + i * 0.05 + dur);
+    });
   },
 };
