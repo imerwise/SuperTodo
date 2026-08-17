@@ -678,6 +678,11 @@ function closeTodoDetail(index) {
   if (todoDetailReturn) {
     const r = todoDetailReturn;
     todoDetailReturn = null;
+    if (r.project) {
+      mode = "projects";
+      renderProjectDetail(r.project);
+      return;
+    }
     tagFilterReturn = r.filterReturn; // set before openTaggedResults so it's kept
     openTaggedResults(r.tags, r.matchAll).then(() => {
       // openTaggedResults derives this from tagListView (false here); restore it
@@ -1688,10 +1693,10 @@ function openProjectFromOutside(slug) {
   renderProjectDetail(slug);
 }
 
-// Leave the project detail and open a linked task / idea. Simple one-way
-// navigation for now — Esc from the item returns to its own module, and ⌥P
-// brings the project back.
+// Leave the project detail and open a linked task / idea. Esc from the item
+// returns to the project detail view; ⌥P also brings the project back.
 async function openTodoFromProject(date, todoIndex) {
+  const projectSlug = projectDetailSlug;
   mode = "todo";
   projectDetailSlug = null;
   editingIndex = null;
@@ -1706,6 +1711,8 @@ async function openTodoFromProject(date, todoIndex) {
   if (todoIndex >= 0 && todoIndex < data.items.length) {
     selectedIndex = todoIndex;
     renderTodoDetail(todoIndex);
+    // Mark this detail as opened from a project so Esc returns there.
+    todoDetailReturn = { project: projectSlug };
   } else {
     render(data);
   }
@@ -1713,12 +1720,15 @@ async function openTodoFromProject(date, todoIndex) {
 
 async function openIdeaFromProject(slug) {
   mode = "ideas";
+  const projectSlug = projectDetailSlug;
   projectDetailSlug = null;
   prevBtn.style.display = "none";
   nextBtn.style.display = "none";
   inputEl.placeholder = "Add an idea…";
   ideas = await invoke("get_ideas");
   renderIdeaDetail(slug);
+  // Mark this detail as opened from a project so Esc returns there.
+  ideaDetailReturn = { project: projectSlug };
 }
 
 
@@ -2317,6 +2327,11 @@ function exitIdeaDetail() {
     const r = ideaDetailReturn;
     ideaDetailReturn = null;
     ideaDetailSlug = null;
+    if (r.project) {
+      mode = "projects";
+      renderProjectDetail(r.project);
+      return;
+    }
     tagFilterReturn = r.filterReturn; // set before openTaggedResults so it's kept
     openTaggedResults(r.tags, r.matchAll).then(() => {
       filterCameFromList = r.cameFromList;
