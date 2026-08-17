@@ -4,6 +4,7 @@ const weekdayEl = document.getElementById("weekday");
 const dateEl = document.getElementById("date");
 const modeIndicatorEl = document.getElementById("modeIndicator");
 const listEl = document.getElementById("list");
+const contentEl = listEl.parentElement; // <main class="content"> — the scroll container
 const emptyEl = document.getElementById("empty");
 const inputEl = document.getElementById("input");
 const composerEl = document.getElementById("composer");
@@ -149,7 +150,7 @@ let emojiPickerTarget = null; // { slug, callback } for the active picker
 // Project state.
 let projects = []; // list of ProjectListEntry
 let projectDetailSlug = null; // slug of the project shown in its detail view
-let projectScrollPos = null; // saved listEl.scrollTop for returning to project detail
+let projectScrollPos = null; // saved contentEl.scrollTop for returning to project detail
 
 // --- date helpers (local, no timezone drift) ---
 function addDays(iso, n) {
@@ -1533,14 +1534,15 @@ function renderProjectDetail(slug) {
     
 
     listEl.appendChild(detail);
-    titleInput.focus();
+    if (projectScrollPos == null) titleInput.focus();
     loadLinkedItems(p.slug).then(() => {
       const pos = projectScrollPos;
       if (pos != null) {
         console.log("[ui] restore project scroll", pos);
         requestAnimationFrame(() => {
-          listEl.scrollTop = pos;
+          contentEl.scrollTop = pos;
           projectScrollPos = null;
+          titleInput.focus({ preventScroll: true });
         });
       }
     });
@@ -1706,7 +1708,8 @@ function openProjectFromOutside(slug) {
 // Leave the project detail and open a linked task / idea. Esc from the item
 // returns to the project detail view; ⌥P also brings the project back.
 async function openTodoFromProject(date, todoIndex) {
-  projectScrollPos = listEl.scrollTop;
+  projectScrollPos = contentEl.scrollTop;
+  console.log("[ui] save project scroll", projectScrollPos);
   const projectSlug = projectDetailSlug;
   mode = "todo";
   projectDetailSlug = null;
@@ -1730,7 +1733,7 @@ async function openTodoFromProject(date, todoIndex) {
 }
 
 async function openIdeaFromProject(slug) {
-  projectScrollPos = listEl.scrollTop;
+  projectScrollPos = contentEl.scrollTop;
   mode = "ideas";
   const projectSlug = projectDetailSlug;
   projectDetailSlug = null;
@@ -2186,7 +2189,10 @@ async function goTo(iso, dir = 0) {
 async function openTagList() {
   sfx.enter();
   hideEmojiPicker();
-  if (!tagFilterReturn) tagFilterReturn = { mode, current };
+  if (!tagFilterReturn) {
+    tagFilterReturn = { mode, current, projectSlug: projectDetailSlug };
+    if (projectDetailSlug) projectScrollPos = contentEl.scrollTop;
+  }
   await refreshTags();
   activeTag = null;
   tagListView = true;
@@ -2213,7 +2219,10 @@ async function openTaggedResults(tags, matchAll) {
   if (!list.length) return;
   sfx.enter();
   hideEmojiPicker();
-  if (!tagFilterReturn) tagFilterReturn = { mode, current };
+  if (!tagFilterReturn) {
+    tagFilterReturn = { mode, current, projectSlug: projectDetailSlug };
+    if (projectDetailSlug) projectScrollPos = contentEl.scrollTop;
+  }
   filterCameFromList = tagListView;
   tagListView = false;
   activeTags = list;
@@ -2285,7 +2294,18 @@ function exitTagFlow() {
   if (ret.mode === "ideas") {
     switchMode("ideas", true);
   } else if (ret.mode === "projects") {
-    switchMode("projects", true);
+    if (ret.projectSlug) {
+      mode = "projects";
+      prevBtn.style.display = "none";
+      nextBtn.style.display = "none";
+      modeIndicatorEl.hidden = true;
+      weekdayEl.textContent = "";
+      inputEl.placeholder = "Add a project…";
+      projectDetailSlug = null;
+      renderProjectDetail(ret.projectSlug);
+    } else {
+      switchMode("projects", true);
+    }
   } else {
     mode = "todo";
     prevBtn.style.display = "";
