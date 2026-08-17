@@ -85,6 +85,8 @@ struct DayData {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct IdeaData {
+    #[serde(default)]
+    id: String,
     slug: String,
     emoji: String,
     title: String,
@@ -98,6 +100,8 @@ struct IdeaData {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct IdeaListEntry {
+    #[serde(default)]
+    id: String,
     slug: String,
     emoji: String,
     title: String,
@@ -417,12 +421,37 @@ fn ideas_dir(dir: &PathBuf) -> PathBuf {
     ideas
 }
 
-fn ideas_index_path(dir: &PathBuf) -> PathBuf {
-    ideas_dir(dir).join("ideas_index.json")
+fn idea_file_path(ideas: &PathBuf, slug: &str) -> PathBuf {
+    ideas.join(format!("{}.json", slug))
 }
 
-fn idea_file_path(ideas: &PathBuf, slug: &str) -> PathBuf {
-    ideas.join(format!("{}.md", slug))
+/// Reads every per-idea JSON file from disk and returns a sorted list.
+/// Single source of truth — no separate index file.
+fn read_all_ideas(dir: &PathBuf) -> Vec<IdeaListEntry> {
+    let ideas = ideas_dir(dir);
+    let mut entries: Vec<IdeaListEntry> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&ideas) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(data) = read_idea_json(&ideas, path.file_stem().and_then(|s| s.to_str()).unwrap_or_default()) else {
+                continue;
+            };
+            entries.push(IdeaListEntry {
+                id: data.id,
+                slug: data.slug,
+                emoji: data.emoji,
+                title: data.title,
+                created: data.created,
+                tags: data.tags,
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.created.cmp(&a.created).then(a.slug.cmp(&b.slug)));
+    eprintln!("[ideas] read_all_ideas: {} entries", entries.len());
+    entries
 }
 
 // --- global tag vocabulary -------------------------------------------------
@@ -472,7 +501,7 @@ fn tags_in_creation_order(dir: &PathBuf) -> Vec<String> {
         }
     }
 
-    for entry in read_ideas_index(dir) {
+    for entry in read_all_ideas(dir) {
         // Ideas with no recorded date sort last but stay included.
         let iso = if entry.created.is_empty() {
             "9999-12-31".to_string()
@@ -512,35 +541,28 @@ fn slugify(title: &str) -> String {
     result
 }
 
-fn read_ideas_index(dir: &PathBuf) -> Vec<IdeaListEntry> {
-    let path = ideas_index_path(dir);
-    let mut entries: Vec<IdeaListEntry> = fs::read_to_string(&path)
+fn read_idea_json(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
+    let path = idea_file_path(ideas, slug);
+    eprintln!("[ideas] read_idea_json: slug={} path={}", slug, path.display());
+    fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    eprintln!("[ideas] read_ideas_index: {} entries from {}", entries.len(), path.display());
-    // Sort descending by created date (newest first), then by slug for stable
-    // ordering within the same day.
-    entries.sort_by(|a, b| b.created.cmp(&a.created).then(a.slug.cmp(&b.slug)));
-    entries
 }
 
-fn write_ideas_index(dir: &PathBuf, entries: &[IdeaListEntry]) {
-    let path = ideas_index_path(dir);
-    eprintln!("[ideas] write_ideas_index: {} entries to {}", entries.len(), path.display());
-    if let Ok(json) = serde_json::to_string_pretty(entries) {
+fn write_idea_json(ideas: &PathBuf, idea: &IdeaData) {
+    let path = idea_file_path(ideas, &idea.slug);
+    eprintln!("[ideas] write_idea_json: slug={} path={} title={:?} desc_len={}",
+        idea.slug, path.display(), idea.title, idea.description.len());
+    if let Ok(json) = serde_json::to_string_pretty(idea) {
         let _ = fs::write(&path, json);
     }
 }
 
-fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
-    let path = idea_file_path(ideas, slug);
-    eprintln!("[ideas] read_idea_md: slug={} path={}", slug, path.display());
-    let content = fs::read_to_string(&path).ok()?;
-
-    // First line starting with # is the title, rest is description body.
+/// Parses the title and description body from a Markdown idea file.
+/// Kept as a migration helper for converting legacy .md files.
+fn parse_idea_md_content(content: &str) -> (String, String) {
     let trimmed = content.trim();
-    let (title, description) = if let Some(idx) = trimmed.find('\n') {
+    if let Some(idx) = trimmed.find('\n') {
         let first_line = trimmed[..idx].trim();
         let rest = trimmed[idx..].trim().to_string();
         if first_line.starts_with("# ") {
@@ -554,36 +576,12 @@ fn read_idea_md(ideas: &PathBuf, slug: &str) -> Option<IdeaData> {
         } else {
             (trimmed.to_string(), String::new())
         }
-    };
-
-    eprintln!("[ideas] read_idea_md: parsed title={:?} description_len={}",
-        title, description.len());
-
-    Some(IdeaData {
-        slug: slug.to_string(),
-        emoji: String::new(), // not stored in file anymore
-        title,
-        description,
-        created: String::new(), // not stored in file anymore
-        tags: Vec::new(),       // merged in from the index by get_idea
-    })
+    }
 }
 
-fn write_idea_md(ideas: &PathBuf, idea: &IdeaData) {
-    let path = idea_file_path(ideas, &idea.slug);
-    let content = if idea.description.is_empty() {
-        format!("# {}", idea.title)
-    } else {
-        format!("# {}\n\n{}", idea.title, idea.description)
-    };
-    let final_content = content.trim().to_string() + "\n";
-    eprintln!("[ideas] write_idea_md: slug={} path={} title={:?} desc_len={} content_len={}",
-        idea.slug, path.display(), idea.title, idea.description.len(), final_content.len());
-    let _ = fs::write(&path, final_content);
-}
-
-/// Generate a unique slug by appending -N if the slug already exists in the index.
-fn unique_slug(_dir: &PathBuf, base: &str, entries: &[IdeaListEntry]) -> String {
+/// Generate a unique slug by appending -N if the slug already exists.
+fn unique_slug(dir: &PathBuf, base: &str) -> String {
+    let entries = read_all_ideas(dir);
     eprintln!("[ideas] unique_slug: base={} existing_entries={}", base, entries.len());
     let mut slug = base.to_string();
     let mut counter = 1;
@@ -864,7 +862,7 @@ fn delete_task(date: String, index: usize) -> DayData {
 fn get_ideas() -> Vec<IdeaListEntry> {
     eprintln!("[ideas] COMMAND get_ideas");
     let dir = storage_dir();
-    let entries = read_ideas_index(&dir);
+    let entries = read_all_ideas(&dir);
     eprintln!("[ideas] COMMAND get_ideas: returning {} entries", entries.len());
     entries
 }
@@ -887,13 +885,14 @@ fn add_idea(title: String) -> AddIdeaResult {
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
     eprintln!("[ideas] COMMAND add_idea: ideas_dir={}", ideas.display());
-    let mut entries = read_ideas_index(&dir);
     let base = slugify(&title);
-    let slug = unique_slug(&dir, &base, &entries);
+    let slug = unique_slug(&dir, &base);
     let created = Utc::now().format("%Y-%m-%d").to_string();
     eprintln!("[ideas] COMMAND add_idea: slug={} created={}", slug, created);
 
+    let idea_id = new_id();
     let idea = IdeaData {
+        id: idea_id,
         slug: slug.clone(),
         emoji: String::from("💡"),
         title: title.clone(),
@@ -901,20 +900,12 @@ fn add_idea(title: String) -> AddIdeaResult {
         created: created.clone(),
         tags: Vec::new(),
     };
-    write_idea_md(&ideas, &idea);
+    write_idea_json(&ideas, &idea);
 
-    let slug_copy = slug.clone();
-    entries.push(IdeaListEntry {
-        slug,
-        emoji: String::from("💡"),
-        title,
-        created,
-        tags: Vec::new(),
-    });
-    write_ideas_index(&dir, &entries);
-    let result = read_ideas_index(&dir);
-    eprintln!("[ideas] COMMAND add_idea: done, {} entries total", result.len());
-    AddIdeaResult { entries: result, new_slug: slug_copy }
+    let slug_copy = slug;
+    let entries = read_all_ideas(&dir);
+    eprintln!("[ideas] COMMAND add_idea: done, {} entries total", entries.len());
+    AddIdeaResult { entries, new_slug: slug_copy }
 }
 
 #[tauri::command]
@@ -922,14 +913,7 @@ fn get_idea(slug: String) -> Option<IdeaData> {
     eprintln!("[ideas] COMMAND get_idea: slug={}", slug);
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
-    let mut result = read_idea_md(&ideas, &slug)?;
-    // Merge in emoji and created from the index
-    let entries = read_ideas_index(&dir);
-    if let Some(entry) = entries.iter().find(|e| e.slug == slug) {
-        result.emoji = entry.emoji.clone();
-        result.created = entry.created.clone();
-        result.tags = entry.tags.clone();
-    }
+    let result = read_idea_json(&ideas, &slug)?;
     eprintln!("[ideas] COMMAND get_idea: result={:?}", (&result.title, &result.emoji, result.description.len()));
     Some(result)
 }
@@ -961,64 +945,43 @@ fn edit_idea(slug: String, emoji: Option<String>, title: Option<String>, descrip
     eprintln!("[ideas] COMMAND edit_idea: slug={} emoji={:?} title={:?} description_len={:?} tags={:?}", slug, emoji, title, description.as_ref().map(|d| d.len()), tags);
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
-    let mut entries = read_ideas_index(&dir);
 
-    let entry_idx = entries.iter().position(|e| e.slug == slug);
-    if entry_idx.is_none() {
-        eprintln!("[ideas] COMMAND edit_idea: slug not found in index, returning {} entries", entries.len());
-        return EditIdeaResult { entries, new_slug: None };
-    }
-    let idx = entry_idx.unwrap();
-
-    let mut idea = match read_idea_md(&ideas, &slug) {
+    let mut idea = match read_idea_json(&ideas, &slug) {
         Some(i) => i,
         None => {
-            eprintln!("[ideas] COMMAND edit_idea: .md file not found, returning {} entries", entries.len());
+            let entries = read_all_ideas(&dir);
+            eprintln!("[ideas] COMMAND edit_idea: .json file not found, returning {} entries", entries.len());
             return EditIdeaResult { entries, new_slug: None };
         }
     };
 
-    let mut slug_changed = false;
     let mut new_slug = None;
 
     if let Some(e) = emoji {
         if !e.is_empty() {
-            idea.emoji = e.clone();
-            entries[idx].emoji = e;
+            idea.emoji = e;
         }
     }
     if let Some(t) = title {
         if !t.is_empty() && t != idea.title {
-            // Compute new slug, delete old file, update entry
             let base = slugify(&t);
-            let slug_no_counter = unique_slug(&dir, &base, &entries);
+            let slug_no_counter = unique_slug(&dir, &base);
             let old_path = idea_file_path(&ideas, &slug);
             let _ = fs::remove_file(&old_path);
-            idea.title = t.clone();
+            idea.title = t;
             idea.slug = slug_no_counter.clone();
-            entries[idx].slug = slug_no_counter.clone();
-            entries[idx].title = t;
             new_slug = Some(slug_no_counter);
-            slug_changed = true;
         }
     }
     if let Some(d) = description {
         idea.description = d;
     }
     if let Some(t) = tags {
-        let clean = normalize_tags(&t);
-        entries[idx].tags = clean.clone();
-        idea.tags = clean;
+        idea.tags = normalize_tags(&t);
     }
 
-    write_idea_md(&ideas, &idea);
-    if !slug_changed {
-        write_ideas_index(&dir, &entries);
-    } else {
-        // Re-read and re-write to ensure proper sort
-        let _ = write_ideas_index(&dir, &entries);
-        entries = read_ideas_index(&dir);
-    }
+    write_idea_json(&ideas, &idea);
+    let entries = read_all_ideas(&dir);
     eprintln!("[ideas] COMMAND edit_idea: done, {} entries, new_slug={:?}", entries.len(), new_slug);
     EditIdeaResult { entries, new_slug }
 }
@@ -1028,14 +991,12 @@ fn delete_idea(slug: String) -> Vec<IdeaListEntry> {
     eprintln!("[ideas] COMMAND delete_idea: slug={}", slug);
     let dir = storage_dir();
     let ideas = ideas_dir(&dir);
-    let mut entries = read_ideas_index(&dir);
 
     let path = idea_file_path(&ideas, &slug);
     eprintln!("[ideas] COMMAND delete_idea: removing file {}", path.display());
     let _ = fs::remove_file(&path);
 
-    entries.retain(|e| e.slug != slug);
-    write_ideas_index(&dir, &entries);
+    let entries = read_all_ideas(&dir);
     eprintln!("[ideas] COMMAND delete_idea: done, {} entries remaining", entries.len());
     entries
 }
@@ -1216,7 +1177,7 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
     let ideas: Vec<IdeaListEntry> = if needles.is_empty() {
         Vec::new()
     } else {
-        read_ideas_index(&dir)
+        read_all_ideas(&dir)
             .into_iter()
             .filter(|e| matches(&e.tags))
             .collect()
@@ -1236,6 +1197,8 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ProjectListEntry {
+    #[serde(default)]
+    id: String,
     slug: String,
     name: String,
     // The single owning tag, without a leading '#'. "" until the user sets one.
@@ -1247,6 +1210,8 @@ struct ProjectListEntry {
 
 #[derive(Serialize)]
 struct ProjectData {
+    #[serde(default)]
+    id: String,
     slug: String,
     name: String,
     tag: String,
@@ -1338,6 +1303,7 @@ fn add_project(name: String) -> AddProjectResult {
     }
     let created = today().format("%Y-%m-%d").to_string();
     entries.push(ProjectListEntry {
+        id: new_id(),
         slug: slug.clone(),
         name,
         tag: String::new(),
@@ -1359,6 +1325,7 @@ fn get_project(slug: String) -> Option<ProjectData> {
         .find(|e| e.slug == slug)?;
     let notes = fs::read_to_string(project_notes_path(&dir, &slug)).unwrap_or_default();
     Some(ProjectData {
+        id: entry.id,
         slug: entry.slug,
         name: entry.name,
         tag: entry.tag,
@@ -1789,10 +1756,344 @@ mod storage_tests {
         let _ = fs::remove_dir_all(&tmp);
         std::env::remove_var("SUPERTODO_DIR");
     }
+
+    // Converts legacy .md ideas to .json, cleans up the old ideas_index.json,
+    // and removes the .md files. Verifies idempotency on a second run and
+    // handles orphan .md (no matching JSON).
+    #[test]
+    fn idea_md_to_json_migration() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_idea_mig_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        let ideas = ideas_dir(&tmp);
+
+        // Write a legacy ideas_index.json (simulates pre-migration state)
+        fs::write(
+            ideas.join("ideas_index.json"),
+            r#"[
+                {"id":"","slug":"test-idea","emoji":"🎯","title":"Test Idea","created":"2026-01-15","tags":["demo"]}
+            ]"#,
+        )
+        .unwrap();
+
+        // Write a legacy .md file matching the index entry
+        fs::write(ideas.join("test-idea.md"), "# Test Idea\n\nBody text here\n").unwrap();
+
+        // Write an orphan .md (no matching entry in the old index)
+        fs::write(ideas.join("orphan.md"), "# Orphan\n\nNo index entry\n").unwrap();
+
+        // Write a .md that already has a .json sibling (should be skipped)
+        fs::write(ideas.join("already-json.md"), "# Already JSON\n").unwrap();
+        fs::write(
+            ideas.join("already-json.json"),
+            r#"{"id":"x","slug":"already-json","emoji":"💡","title":"Already JSON","description":"","created":"2026-03-01","tags":[]}"#,
+        )
+        .unwrap();
+
+        // Run migration
+        migrate_ideas(&tmp);
+
+        // --- old index file should be deleted ---
+        assert!(!ideas.join("ideas_index.json").exists(), "old index should be deleted");
+
+        // --- test-idea: json exists with correct fields from old index ---
+        let json_path = ideas.join("test-idea.json");
+        assert!(json_path.exists(), "test-idea.json should exist");
+        let idea: IdeaData =
+            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(idea.slug, "test-idea");
+        assert_eq!(idea.title, "Test Idea");
+        assert_eq!(idea.description, "Body text here");
+        assert_eq!(idea.emoji, "🎯"); // from old index
+        assert_eq!(idea.created, "2026-01-15"); // from old index
+        assert_eq!(idea.tags, vec!["demo"]); // from old index
+        assert!(!idea.id.is_empty(), "id should be filled");
+        assert!(!ideas.join("test-idea.md").exists(), ".md should be deleted");
+
+        // --- orphan: json exists with defaults ---
+        let orphan_json = ideas.join("orphan.json");
+        assert!(orphan_json.exists(), "orphan.json should exist");
+        let orphan: IdeaData =
+            serde_json::from_str(&fs::read_to_string(&orphan_json).unwrap()).unwrap();
+        assert_eq!(orphan.slug, "orphan");
+        assert_eq!(orphan.title, "Orphan");
+        assert_eq!(orphan.description, "No index entry");
+        assert_eq!(orphan.emoji, "💡"); // default
+        assert!(orphan.tags.is_empty());
+        assert!(!orphan.id.is_empty());
+        assert!(!ideas.join("orphan.md").exists(), "orphan .md should be deleted");
+
+        // --- already-json: untouched ---
+        assert!(ideas.join("already-json.json").exists(), "existing .json should survive");
+        assert!(ideas.join("already-json.md").exists(), ".md with .json sibling should stay");
+
+        // --- read_all_ideas returns all entries correctly ---
+        let all = read_all_ideas(&tmp);
+        assert_eq!(all.len(), 3);
+        for entry in &all {
+            assert!(!entry.id.is_empty(), "entry {} should have id", entry.slug);
+        }
+
+        // --- idempotent: second run changes nothing ---
+        migrate_ideas(&tmp);
+        assert!(!ideas.join("ideas_index.json").exists(), "index still gone after second run");
+        let all2 = read_all_ideas(&tmp);
+        assert_eq!(all2.len(), all.len());
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+
+    // Backfills empty todo ids in existing day-files, preserving all other
+    // fields (especially rolled). Idempotent on a second run.
+    #[test]
+    fn todo_id_backfill_migration() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_todo_backfill_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        // Write a day-file with some empty ids and some filled
+        let date = NaiveDate::from_ymd_opt(2023, 5, 10).unwrap();
+        let items = vec![
+            TodoItem {
+                id: String::new(), // empty — needs backfill
+                checked: false,
+                carried: true,
+                rolled: false,
+                text: "Task with no id".into(),
+                description: "desc".into(),
+                created: "2023-05-09".into(),
+                tags: vec!["x".into()],
+            },
+            TodoItem {
+                id: "already-has-id".into(), // already filled
+                checked: true,
+                carried: false,
+                rolled: true,
+                text: "Done task".into(),
+                description: String::new(),
+                created: "2023-05-08".into(),
+                tags: vec![],
+            },
+        ];
+        write_day_items(&tmp, date, &items);
+
+        // Verify the first item has an id after write (write_day_items backfills)
+        // but let's force an empty one by writing directly
+        let mut raw_items = items.clone();
+        raw_items[0].id = String::new();
+        let path = json_file_for(&tmp, date);
+        fs::write(&path, serde_json::to_string_pretty(&raw_items).unwrap()).unwrap();
+
+        // Run backfill
+        backfill_todo_ids(&tmp);
+
+        let loaded = read_items_json(&path);
+        assert_eq!(loaded.len(), 2);
+        // First item now has an id
+        assert!(!loaded[0].id.is_empty(), "empty id should be backfilled");
+        // Second item keeps its id
+        assert_eq!(loaded[1].id, "already-has-id");
+        // All other fields preserved
+        assert_eq!(loaded[0].text, "Task with no id");
+        assert_eq!(loaded[0].description, "desc");
+        assert_eq!(loaded[0].created, "2023-05-09");
+        assert_eq!(loaded[0].tags, vec!["x"]);
+        assert!(loaded[0].carried);
+        assert!(!loaded[0].rolled);
+        assert!(loaded[1].checked);
+        assert!(loaded[1].rolled);
+
+        // Idempotent: second run doesn't change ids
+        let ids_before: Vec<String> = loaded.iter().map(|i| i.id.clone()).collect();
+        backfill_todo_ids(&tmp);
+        let loaded2 = read_items_json(&path);
+        let ids_after: Vec<String> = loaded2.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids_before, ids_after);
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+
+    // Backfills empty project ids in the project index.
+    #[test]
+    fn project_id_backfill_migration() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("supertodo_proj_backfill_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("SUPERTODO_DIR", &tmp);
+
+        // Write an index with no ids
+        let entries = vec![
+            ProjectListEntry {
+                id: String::new(),
+                slug: "project-a".into(),
+                name: "Project A".into(),
+                tag: "proj-a".into(),
+                path: "/tmp/a".into(),
+                created: "2026-01-01".into(),
+            },
+            ProjectListEntry {
+                id: String::new(),
+                slug: "project-b".into(),
+                name: "Project B".into(),
+                tag: "".into(),
+                path: "".into(),
+                created: "2026-02-01".into(),
+            },
+        ];
+        write_projects_index(&tmp, &entries);
+
+        // Run backfill
+        backfill_project_ids(&tmp);
+
+        let updated = read_projects_index(&tmp);
+        assert_eq!(updated.len(), 2);
+        assert!(!updated[0].id.is_empty(), "project-a should have id");
+        assert!(!updated[1].id.is_empty(), "project-b should have id");
+        assert_ne!(updated[0].id, updated[1].id, "ids should be unique");
+        // Other fields untouched
+        assert_eq!(updated[0].slug, "project-a");
+        assert_eq!(updated[0].name, "Project A");
+
+        // Idempotent
+        let ids_before: Vec<String> = updated.iter().map(|e| e.id.clone()).collect();
+        backfill_project_ids(&tmp);
+        let ids_after: Vec<String> =
+            read_projects_index(&tmp).iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids_before, ids_after);
+
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::remove_var("SUPERTODO_DIR");
+    }
+}
+
+// --- storage migration ------------------------------------------------------
+// One-time startup migrations: converts legacy formats to the current layout
+// and backfills ids that predate the id fields. All steps are idempotent.
+
+/// Converts legacy `ideas/<slug>.md` files to `<slug>.json` and deletes the .md.
+/// Also cleans up the old `ideas_index.json` if it still exists.
+fn migrate_ideas(dir: &PathBuf) {
+    let ideas = ideas_dir(dir);
+
+    // Read the old index into memory before deleting it, so .md files can
+    // still look up emoji/created/tags from it.
+    let old_index_path = ideas.join("ideas_index.json");
+    let old_index: Vec<IdeaListEntry> = fs::read_to_string(&old_index_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // Delete the old index file — no longer used.
+    if old_index_path.exists() {
+        eprintln!("[ideas] removing legacy ideas_index.json");
+        let _ = fs::remove_file(&old_index_path);
+    }
+
+    if let Ok(rd) = fs::read_dir(&ideas) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()) else {
+                continue;
+            };
+            if stem.is_empty() {
+                continue;
+            }
+
+            let json_path = ideas.join(format!("{}.json", stem));
+            if json_path.exists() {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let (title, description) = parse_idea_md_content(&content);
+
+            let old_entry = old_index.iter().find(|e| e.slug == stem);
+
+            let (emoji, created, tags) = if let Some(e) = old_entry {
+                (e.emoji.clone(), e.created.clone(), e.tags.clone())
+            } else {
+                let birth = path.metadata()
+                    .ok()
+                    .and_then(|m| m.created().ok())
+                    .map(|t| -> String {
+                        let dt: chrono::DateTime<Utc> = t.into();
+                        dt.format("%Y-%m-%d").to_string()
+                    })
+                    .unwrap_or_default();
+                (String::from("💡"), birth, Vec::new())
+            };
+
+            let idea = IdeaData {
+                id: new_id(),
+                slug: stem,
+                emoji,
+                title,
+                description,
+                created,
+                tags,
+            };
+            write_idea_json(&ideas, &idea);
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Backfills empty todo ids in every day-file. This is the one deliberate
+/// exception to the "never rewrite past-day files" invariant — a full-fidelity
+/// rewrite that preserves every field (checked, carried, rolled, text,
+/// description, created, tags) while adding ids where they are missing.
+fn backfill_todo_ids(dir: &PathBuf) {
+    for date in all_todo_dates(dir) {
+        let path = json_file_for(dir, date);
+        if !path.exists() {
+            continue;
+        }
+        let items = read_items_json(&path);
+        if items.iter().any(|i| i.id.is_empty()) {
+            write_day_items(dir, date, &items);
+        }
+    }
+}
+
+/// Backfills empty project ids in the project index.
+fn backfill_project_ids(dir: &PathBuf) {
+    let mut entries = read_projects_index(dir);
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        if entry.id.is_empty() {
+            entry.id = new_id();
+            changed = true;
+        }
+    }
+    if changed {
+        write_projects_index(dir, &entries);
+    }
+}
+
+/// Runs all one-time startup migrations.
+fn migrate_storage(dir: &PathBuf) {
+    migrate_ideas(dir);
+    backfill_todo_ids(dir);
+    backfill_project_ids(dir);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    migrate_storage(&storage_dir());
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())

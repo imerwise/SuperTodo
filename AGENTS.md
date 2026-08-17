@@ -27,13 +27,17 @@ All Tauri commands are defined in `src-tauri/src/lib.rs`, grouped by module:
 
 ## Storage layout
 
-Storage root is `~/Documents/SuperTodo/` (or the user's Settings choice). Day-files are structured JSON at `todos/todo_YYYYMMDD.json` — an array of items `{ id, checked, carried, rolled, text, description, created, tags }`. Ideas are `ideas/ideas_index.json` + `ideas/<slug>.md`. Projects are `projects/projects_index.json` + `projects/<slug>.md` (notes). `tags.json` holds the persistent tag→color map. Legacy plain-text `todo_*.txt` files are migrated to JSON on first read (inline `#tags` lifted into structured tags).
+Storage root is `~/Documents/SuperTodo/` (or the user's Settings choice). Day-files are structured JSON at `todos/todo_YYYYMMDD.json` — an array of items `{ id, checked, carried, rolled, text, description, created, tags }`. Ideas are per-idea files at `ideas/<slug>.json` — each holds the full record `{ id, slug, emoji, title, description, created, tags }`; there is no separate index file (the list is derived by scanning the `ideas/` directory). Projects are `projects/projects_index.json` (index entries carry `id`) + `projects/<slug>.md` (notes). `tags.json` holds the persistent tag→color map.
+
+All items across todos, ideas, and projects carry a stable `id` generated via `new_id()` (hex epoch-nanos + counter). For todos the id is preserved through carry-over; for ideas and projects it is generated at creation and never changes (rename never re-ids).
+
+Legacy plain-text `todo_*.txt` files are migrated to JSON on first read (inline `#tags` lifted into structured tags). Legacy `ideas/<slug>.md` files are converted to `<slug>.json` at startup by `migrate_storage()` and the `.md` is deleted; the old `ideas_index.json` is also removed. The same startup pass backfills empty `id` fields in past day-files and the project index — the one deliberate exception to the past-days read-only rule.
 
 ## Carry-over — the critical invariant
 
 `ensure_today()` runs on every open of today: it carries every unfinished task from the most recent previous day into today's file and marks the source item `rolled`. This is **idempotent** — rolled items are never carried again. The most fragile rules:
 
-- **Never rewrite past-day files.** All mutating commands guard `d >= today()`. The one allowed past-day write is carry-over's own `rolled` marking. Past days are read-only in the UI too.
+- **Never rewrite past-day files.** All mutating commands guard `d >= today()`. The one allowed past-day write is carry-over's own `rolled` marking. Past days are read-only in the UI too. The one deliberate exception is the startup `backfill_todo_ids()` pass (fills empty `id` fields from before the id field existed).
 - **The `rolled` flag must round-trip through read/write.** Dropping it re-triggers carry-over and duplicates tasks.
 - **`id` is stable**: generated in `add_task`, preserved through carry-over, backfilled by `write_day_items` for legacy items. It is how agent runs attach to a task across days — never regenerate it.
 
