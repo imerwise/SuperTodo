@@ -1154,12 +1154,20 @@ fn get_tagged_multi(tags: Vec<String>, match_all: bool) -> TaggedResult {
 
     let mut todos: Vec<TaggedTodo> = Vec::new();
     if !needles.is_empty() {
-        // Collect matching todos from every day-file, newest day first.
+        use std::collections::HashSet;
+        // Deduplicate by id: a carried-over task appears in multiple day-files
+        // with the same id. Since we iterate newest-first, the first occurrence
+        // of each id is the most recent one; we keep it and skip the rest.
+        // Items with empty id (legacy) are never deduplicated.
+        let mut seen: HashSet<String> = HashSet::new();
         let mut dates = all_todo_dates(&dir);
         dates.sort_by_key(|date| std::cmp::Reverse(*date));
         for date in dates {
             for (index, item) in load_day_items(&dir, date).into_iter().enumerate() {
                 if matches(&item.tags) {
+                    if !item.id.is_empty() && !seen.insert(item.id.clone()) {
+                        continue;
+                    }
                     todos.push(TaggedTodo {
                         date: date.format("%Y-%m-%d").to_string(),
                         index,
