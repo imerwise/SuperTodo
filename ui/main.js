@@ -149,6 +149,7 @@ let emojiPickerTarget = null; // { slug, callback } for the active picker
 // Project state.
 let projects = []; // list of ProjectListEntry
 let projectDetailSlug = null; // slug of the project shown in its detail view
+let projectScrollPos = null; // saved listEl.scrollTop for returning to project detail
 
 // --- date helpers (local, no timezone drift) ---
 function addDays(iso, n) {
@@ -1533,7 +1534,12 @@ function renderProjectDetail(slug) {
 
     listEl.appendChild(detail);
     titleInput.focus();
-    loadLinkedItems(p.slug);
+    loadLinkedItems(p.slug).then(() => {
+      if (projectScrollPos != null) {
+        listEl.scrollTop = projectScrollPos;
+        projectScrollPos = null;
+      }
+    });
     updateHints();
   });
 }
@@ -1696,6 +1702,7 @@ function openProjectFromOutside(slug) {
 // Leave the project detail and open a linked task / idea. Esc from the item
 // returns to the project detail view; ⌥P also brings the project back.
 async function openTodoFromProject(date, todoIndex) {
+  projectScrollPos = listEl.scrollTop;
   const projectSlug = projectDetailSlug;
   mode = "todo";
   projectDetailSlug = null;
@@ -1719,6 +1726,7 @@ async function openTodoFromProject(date, todoIndex) {
 }
 
 async function openIdeaFromProject(slug) {
+  projectScrollPos = listEl.scrollTop;
   mode = "ideas";
   const projectSlug = projectDetailSlug;
   projectDetailSlug = null;
@@ -1750,6 +1758,7 @@ async function switchMode(newMode, silent) {
   todoDetailIndex = null;
   todoDetailReturn = null;
   projectDetailSlug = null;
+  projectScrollPos = null;
   inputEl.blur();
 
   // If coming back from idea detail, re-select the source idea
