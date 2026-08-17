@@ -1703,7 +1703,7 @@ async function openTodoFromProject(date, todoIndex) {
   lastData = data;
   current = data.date;
   viewIsPast = data.is_past;
-  if (!data.is_past && todoIndex >= 0 && todoIndex < data.items.length) {
+  if (todoIndex >= 0 && todoIndex < data.items.length) {
     selectedIndex = todoIndex;
     renderTodoDetail(todoIndex);
   } else {
