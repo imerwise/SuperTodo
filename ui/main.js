@@ -1535,9 +1535,13 @@ function renderProjectDetail(slug) {
     listEl.appendChild(detail);
     titleInput.focus();
     loadLinkedItems(p.slug).then(() => {
-      if (projectScrollPos != null) {
-        listEl.scrollTop = projectScrollPos;
-        projectScrollPos = null;
+      const pos = projectScrollPos;
+      if (pos != null) {
+        console.log("[ui] restore project scroll", pos);
+        requestAnimationFrame(() => {
+          listEl.scrollTop = pos;
+          projectScrollPos = null;
+        });
       }
     });
     updateHints();
